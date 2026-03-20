@@ -1,0 +1,18 @@
+{
+  "network": "bsc-testnet",
+  "chainId": 97,
+  "contracts": {
+    "AgenticCommerce": {
+      "proxy": "0x8b121FEf5e1688B976D814003f05d9366F3Fa8A3",
+      "implementation": "0x028fa1591c98b8a71a87f6f6bf94aa0238b5f987"
+    },
+    "APEXEvaluator": {
+      "proxy": "0x283d858244932664bd69eb7FE3b1587b84B14be8",
+      "implementation": "0x261be174c2d3028fff401496046de6fa77e7f911"
+    }
+  },
+  "externalContracts": {
+    "paymentToken": "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565",
+    "umaOOv3": "0xFc5bb3e475cc9264760Cf33b1e9ea7B87942C709"
+  }
+}

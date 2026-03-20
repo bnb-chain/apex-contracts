@@ -1,0 +1,187 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { network } from "hardhat";
+import { encodeFunctionData, getAddress, keccak256, toHex, zeroAddress } from "viem";
+import { Status, MIN_BUDGET, DEFAULT_BUDGET, DEFAULT_LIVENESS, DEFAULT_BOND } from "./constants.js";
+import {
+  deployMockToken,
+  mintTokens,
+  deployAPEXProxy,
+  deployEvaluatorProxy,
+  deployMockOOv3,
+  createAndFundJob,
+} from "./deploy.js";
+
+describe("UUPS Upgrade Tests", async function () {
+  const { viem } = await network.connect();
+  const publicClient = await viem.getPublicClient();
+
+  const [deployer, client, provider, evaluator, other] = await viem.getWalletClients();
+  const deployerAddress = getAddress(deployer.account.address);
+  const clientAddress = getAddress(client.account.address);
+  const providerAddress = getAddress(provider.account.address);
+  const evaluatorAddress = getAddress(evaluator.account.address);
+  const otherAddress = getAddress(other.account.address);
+
+  // ============================================================
+  // AgenticCommerce Upgrade Tests
+  // ============================================================
+
+  describe("AgenticCommerce Upgrade", async () => {
+    it("should upgrade and preserve state", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+
+      // Create some state
+      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Upgrade test job", zeroAddress]);
+
+      // Record state before upgrade
+      const nextJobIdBefore = await apex.read.nextJobId();
+      const minBudgetBefore = await apex.read.minBudget();
+      const paymentTokenBefore = await apex.read.paymentToken();
+
+      // Deploy new implementation
+      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable");
+
+      // Upgrade
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.upgradeToAndCall([newImpl.address, "0x"]);
+
+      // Verify state preserved
+      const nextJobIdAfter = await apex.read.nextJobId();
+      const minBudgetAfter = await apex.read.minBudget();
+      const paymentTokenAfter = await apex.read.paymentToken();
+
+      assert.equal(nextJobIdAfter, nextJobIdBefore);
+      assert.equal(minBudgetAfter, minBudgetBefore);
+      assert.equal(getAddress(paymentTokenAfter), getAddress(paymentTokenBefore));
+
+      // Verify job data preserved
+      const job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(getAddress(job.client), clientAddress);
+      assert.equal(job.description, "Upgrade test job");
+      assert.equal(job.status, Status.Open);
+    });
+
+    it("should continue working after upgrade", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+
+      // Create and fund a job
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET
+      );
+
+      // Upgrade
+      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable");
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.upgradeToAndCall([newImpl.address, "0x"]);
+
+      // Submit work (should work after upgrade)
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([jobId, keccak256(toHex("d")), "0x"]);
+
+      // Complete (should work after upgrade)
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      await apexAsEvaluator.write.complete([jobId, keccak256(toHex("ok")), "0x"]);
+
+      const job = await apex.read.getJob([jobId]);
+      assert.equal(job.status, Status.Completed);
+
+      // Provider should have received payment
+      const balance = await token.read.balanceOf([providerAddress]);
+      assert.equal(balance, DEFAULT_BUDGET);
+    });
+
+    it("should revert upgrade from non-owner", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+
+      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable");
+
+      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: other },
+      });
+
+      await assert.rejects(
+        apexAsOther.write.upgradeToAndCall([newImpl.address, "0x"]),
+        /OwnableUnauthorizedAccount/
+      );
+    });
+  });
+
+  // ============================================================
+  // APEXEvaluator Upgrade Tests
+  // ============================================================
+
+  describe("APEXEvaluator Upgrade", async () => {
+    it("should upgrade evaluator and preserve state", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
+
+      const evaluatorProxy = await deployEvaluatorProxy(
+        viem, deployerAddress, apex.address, oov3.address, token.address, DEFAULT_LIVENESS
+      );
+
+      // Deposit some bond
+      await token.write.mint([deployerAddress, DEFAULT_BOND * BigInt(3)]);
+      const tokenAsDeployer = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: deployer },
+      });
+      await tokenAsDeployer.write.approve([evaluatorProxy.address, DEFAULT_BOND * BigInt(3)]);
+      const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluatorProxy.address, {
+        client: { wallet: deployer },
+      });
+      await evalAsDeployer.write.depositBond([DEFAULT_BOND * BigInt(2)]);
+
+      // Record state
+      const bondBalBefore = await evaluatorProxy.read.bondBalance();
+      const livenessBefore = await evaluatorProxy.read.liveness();
+
+      // Deploy new impl and upgrade
+      const newImpl = await viem.deployContract("APEXEvaluatorUpgradeable");
+      await evalAsDeployer.write.upgradeToAndCall([newImpl.address, "0x"]);
+
+      // Verify preserved
+      const bondBalAfter = await evaluatorProxy.read.bondBalance();
+      const livenessAfter = await evaluatorProxy.read.liveness();
+
+      assert.equal(bondBalAfter, bondBalBefore);
+      assert.equal(livenessAfter, livenessBefore);
+    });
+
+    it("should revert evaluator upgrade from non-owner", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
+
+      const evaluatorProxy = await deployEvaluatorProxy(
+        viem, deployerAddress, apex.address, oov3.address, token.address, DEFAULT_LIVENESS
+      );
+
+      const newImpl = await viem.deployContract("APEXEvaluatorUpgradeable");
+
+      const evalAsOther = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluatorProxy.address, {
+        client: { wallet: other },
+      });
+
+      await assert.rejects(
+        evalAsOther.write.upgradeToAndCall([newImpl.address, "0x"]),
+        /OwnableUnauthorizedAccount/
+      );
+    });
+  });
+});
