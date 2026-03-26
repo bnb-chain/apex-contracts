@@ -38,9 +38,9 @@ const config: HardhatUserConfig = {
   solidity: {
     profiles: {
       default: {
-        version: "0.8.24",
+        version: "0.8.28",
         settings: {
-          evmVersion: "shanghai",
+          evmVersion: "cancun",
           optimizer: {
             enabled: true,
             runs: 200,
@@ -49,9 +49,9 @@ const config: HardhatUserConfig = {
         },
       },
       production: {
-        version: "0.8.24",
+        version: "0.8.28",
         settings: {
-          evmVersion: "shanghai",
+          evmVersion: "cancun",
           optimizer: {
             enabled: true,
             runs: 200,
