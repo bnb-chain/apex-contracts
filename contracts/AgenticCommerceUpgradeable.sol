@@ -1,131 +1,67 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
+import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "./IERC8183Hook.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
+import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
+import "./IACPHook.sol";
 
-/**
- * @title AgenticCommerceUpgradeable
- * @notice Pure ERC-8183 Agent Payment Exchange Protocol (APEX) - UUPS-upgradeable implementation
- * @dev Job escrow with evaluator attestation for agent commerce.
- *      State machine: Open → Funded → Submitted → Terminal (Completed/Rejected/Expired)
- *
- * Key features:
- *   - Full ERC-8183 compliance
- *   - Optional per-job hooks (IERC8183Hook)
- *   - Safe payout with pending withdrawals fallback
- */
 contract AgenticCommerceUpgradeable is
-    OwnableUpgradeable,
-    UUPSUpgradeable,
-    ReentrancyGuardUpgradeable
+    Initializable,
+    AccessControlUpgradeable,
+    ReentrancyGuardTransient,
+    PausableUpgradeable,
+    ERC2771Context,
+    UUPSUpgradeable
 {
     using SafeERC20 for IERC20;
 
-    // ============================================================
-    //  Constants
-    // ============================================================
-
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     uint256 public constant HOOK_GAS_LIMIT = 1_000_000;
-    uint256 public constant MAX_EXPIRY_DURATION = 365 days;
 
-    // ============================================================
-    //  Enums
-    // ============================================================
-
-    enum Status {
-        None,       // 0 - does not exist
-        Open,       // 1 - created, not funded
-        Funded,     // 2 - escrowed, awaiting submission
-        Submitted,  // 3 - work submitted, awaiting evaluation
-        Completed,  // 4 - terminal: provider paid
-        Rejected,   // 5 - terminal: client refunded
-        Expired     // 6 - terminal: client refunded (timeout)
+    enum JobStatus {
+        Open,
+        Funded,
+        Submitted,
+        Completed,
+        Rejected,
+        Expired
     }
 
-    // ============================================================
-    //  Structs
-    // ============================================================
-
     struct Job {
+        uint256 id;
         address client;
         address provider;
         address evaluator;
-        address hook;
+        string description;
         uint256 budget;
         uint256 expiredAt;
-        Status status;
-        bytes32 deliverable;
-        string description;
+        JobStatus status;
+        address hook;
     }
 
-    // ============================================================
-    //  Storage (ERC-7201 Namespaced)
-    // ============================================================
+    IERC20 public paymentToken;
+    uint256 public platformFeeBP;
+    address public platformTreasury;
+    uint256 public evaluatorFeeBP;
 
-    /// @custom:storage-location erc7201:erc8183.protocol.storage
-    struct ERC8183Storage {
-        mapping(uint256 => Job) _jobs;
-        uint256 _nextJobId;
-        IERC20 _paymentToken;
-        uint256 _minBudget;
-        mapping(address => uint256) _pendingWithdrawals;
-        uint256 _totalEscrowed;
-        uint256 _totalPendingWithdrawals;
-    }
-
-    // keccak256(abi.encode(uint256(keccak256("erc8183.protocol.storage")) - 1)) & ~bytes32(uint256(0xff))
-    bytes32 private constant ERC8183_STORAGE_LOCATION =
-        0x9c22ff5f21f0b81b113e63f7db6da94fedef11b2119b4088b89664fb9a3cb300;
-
-    function _getERC8183Storage() private pure returns (ERC8183Storage storage $) {
-        assembly {
-            $.slot := ERC8183_STORAGE_LOCATION
-        }
-    }
-
-    // ============================================================
-    //  Errors
-    // ============================================================
-
-    error JobNotFound(uint256 jobId);
-    error InvalidStatus(uint256 jobId, Status expected, Status actual);
-    error NotClient();
-    error NotProvider();
-    error NotEvaluator();
-    error NotClientOrProvider();
-    error InvalidEvaluator();
-    error InvalidExpiry();
-    error InvalidProvider();
-    error ProviderAlreadySet();
-    error ProviderNotSet();
-    error BudgetNotSet();
-    error BudgetMismatch();
-    error BudgetTooLow(uint256 amount, uint256 minimum);
-    error NotExpired();
-    error NotRefundable();
-    error HookCallFailed();
-    error NothingToClaim();
-    error RescueExceedsExcess(uint256 amount, uint256 excess);
-    error ActiveEscrowsExist();
-    error PendingWithdrawalsExist();
-
-    // ============================================================
-    //  Events (per EIP-8183)
-    // ============================================================
+    mapping(uint256 => Job) public jobs;
+    uint256 public jobCounter;
+    mapping(address => bool) public whitelistedHooks;
+    mapping(uint256 jobId => bool hasBudget) public jobHasBudget;
 
     event JobCreated(
-        uint256 indexed jobId,
-        address indexed client,
-        address provider,
-        address evaluator,
-        uint256 expiredAt
+        uint256 indexed jobId, address indexed client, address indexed provider,
+        address evaluator, uint256 expiredAt, address hook
     );
-    event ProviderSet(uint256 indexed jobId, address provider);
+    event ProviderSet(uint256 indexed jobId, address indexed provider);
     event BudgetSet(uint256 indexed jobId, uint256 amount);
     event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
@@ -133,499 +69,323 @@ contract AgenticCommerceUpgradeable is
     event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
     event JobExpired(uint256 indexed jobId);
     event PaymentReleased(uint256 indexed jobId, address indexed provider, uint256 amount);
+    event EvaluatorFeePaid(uint256 indexed jobId, address indexed evaluator, uint256 amount);
     event Refunded(uint256 indexed jobId, address indexed client, uint256 amount);
-    event TransferFailed(address indexed recipient, uint256 amount, uint256 jobId);
-    event PendingClaimed(address indexed recipient, uint256 amount);
-    event PaymentTokenUpdated(address indexed oldToken, address indexed newToken);
-    event MinBudgetUpdated(uint256 oldMinBudget, uint256 newMinBudget);
-    event TokensRescued(address indexed token, address indexed to, uint256 amount);
+    event HookWhitelistUpdated(address indexed hook, bool status);
+    event ReputationSignal(uint256 indexed jobId, address indexed subject, string role, int8 signal);
 
-    // ============================================================
-    //  Constructor (disable initializers for implementation)
-    // ============================================================
+    error InvalidJob();
+    error WrongStatus();
+    error Unauthorized();
+    error ZeroAddress();
+    error ExpiryTooShort();
+    error ZeroBudget();
+    error ProviderNotSet();
+    error FeesTooHigh();
+    error HookNotWhitelisted();
+    error BudgetMismatch();
+    error HookCallFailed();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
+    constructor(address trustedForwarder_) ERC2771Context(trustedForwarder_) {
         _disableInitializers();
     }
 
-    // ============================================================
-    //  Initializer
-    // ============================================================
-
-    /**
-     * @notice Initialize the contract
-     * @param owner_ Contract owner address
-     * @param paymentToken_ BEP20 token for payments
-     * @param minBudget_ Minimum budget for jobs (0 for no minimum)
-     */
-    function initialize(
-        address owner_,
-        address paymentToken_,
-        uint256 minBudget_
-    ) public initializer {
-        __Ownable_init(owner_);
-        __UUPSUpgradeable_init();
-        __ReentrancyGuard_init();
-
-        require(paymentToken_ != address(0), "invalid token");
-
-        ERC8183Storage storage $ = _getERC8183Storage();
-        $._paymentToken = IERC20(paymentToken_);
-        $._minBudget = minBudget_;
-        $._nextJobId = 1;
-    }
-
-    function _authorizeUpgrade(address) internal override onlyOwner {}
-
-    // ============================================================
-    //  View — Config
-    // ============================================================
-
-    function paymentToken() external view returns (address) {
-        return address(_getERC8183Storage()._paymentToken);
-    }
-
-    function minBudget() external view returns (uint256) {
-        return _getERC8183Storage()._minBudget;
-    }
-
-    function nextJobId() external view returns (uint256) {
-        return _getERC8183Storage()._nextJobId;
-    }
-
-    function totalEscrowed() external view returns (uint256) {
-        return _getERC8183Storage()._totalEscrowed;
-    }
-
-    function totalPendingWithdrawals() external view returns (uint256) {
-        return _getERC8183Storage()._totalPendingWithdrawals;
+    function initialize(address paymentToken_, address treasury_) public initializer {
+        if (paymentToken_ == address(0) || treasury_ == address(0))
+            revert ZeroAddress();
+        __AccessControl_init();
+        __Pausable_init();
+        paymentToken = IERC20(paymentToken_);
+        platformTreasury = treasury_;
+        _grantRole(DEFAULT_ADMIN_ROLE, _msgSender());
+        _grantRole(ADMIN_ROLE, _msgSender());
+        whitelistedHooks[address(0)] = true;
     }
 
     // ============================================================
-    //  View — Job
+    //  ERC-2771 Overrides
     // ============================================================
 
-    function getJob(uint256 jobId) external view returns (Job memory) {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        Job memory job = $._jobs[jobId];
-        if (job.status == Status.None) revert JobNotFound(jobId);
-        return job;
+    function _msgSender() internal view override(ContextUpgradeable, ERC2771Context) returns (address) {
+        return ERC2771Context._msgSender();
     }
 
-    function getJobStatus(uint256 jobId) external view returns (Status) {
-        return _getERC8183Storage()._jobs[jobId].status;
+    function _msgData() internal view override(ContextUpgradeable, ERC2771Context) returns (bytes calldata) {
+        return ERC2771Context._msgData();
     }
 
-    // ============================================================
-    //  Core Functions — Job Creation
-    // ============================================================
-
-    /**
-     * @notice Create a new job
-     * @param provider Provider address (can be zero, set later via setProvider)
-     * @param evaluator Evaluator address (cannot be zero)
-     * @param expiredAt Expiry timestamp (must be in future, within MAX_EXPIRY_DURATION)
-     * @param description Job description
-     * @param hook Optional hook contract address (can be zero)
-     * @return jobId The created job ID
-     */
-    function createJob(
-        address provider,
-        address evaluator,
-        uint256 expiredAt,
-        string calldata description,
-        address hook
-    ) external returns (uint256 jobId) {
-        if (evaluator == address(0)) revert InvalidEvaluator();
-        if (expiredAt <= block.timestamp) revert InvalidExpiry();
-        if (expiredAt > block.timestamp + MAX_EXPIRY_DURATION) revert InvalidExpiry();
-
-        ERC8183Storage storage $ = _getERC8183Storage();
-        jobId = $._nextJobId++;
-
-        Job storage job = $._jobs[jobId];
-        job.client = msg.sender;
-        job.provider = provider;
-        job.evaluator = evaluator;
-        job.hook = hook;
-        job.expiredAt = expiredAt;
-        job.status = Status.Open;
-        job.description = description;
-
-        emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt);
+    function _contextSuffixLength() internal view override(ContextUpgradeable, ERC2771Context) returns (uint256) {
+        return ERC2771Context._contextSuffixLength();
     }
 
     // ============================================================
-    //  Core Functions — Setup (Open state only)
+    //  UUPS
     // ============================================================
 
-    /**
-     * @notice Set provider for a job created without one
-     * @param jobId Job ID
-     * @param provider Provider address (cannot be zero)
-     * @param optParams Optional parameters forwarded to hook
-     */
-    function setProvider(
-        uint256 jobId,
-        address provider,
-        bytes calldata optParams
-    ) external nonReentrant {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        Job storage job = $._jobs[jobId];
-
-        if (job.status == Status.None) revert JobNotFound(jobId);
-        if (job.status != Status.Open) revert InvalidStatus(jobId, Status.Open, job.status);
-        if (msg.sender != job.client) revert NotClient();
-        if (job.provider != address(0)) revert ProviderAlreadySet();
-        if (provider == address(0)) revert InvalidProvider();
-
-        bytes memory hookData = abi.encode(provider, optParams);
-
-        _callHook(job.hook, jobId, this.setProvider.selector, hookData, true);
-
-        job.provider = provider;
-
-        _callHook(job.hook, jobId, this.setProvider.selector, hookData, false);
-
-        emit ProviderSet(jobId, provider);
-    }
-
-    /**
-     * @notice Set or update budget (client or provider can call)
-     * @param jobId Job ID
-     * @param amount Budget amount
-     * @param optParams Optional parameters forwarded to hook
-     */
-    function setBudget(
-        uint256 jobId,
-        uint256 amount,
-        bytes calldata optParams
-    ) external nonReentrant {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        Job storage job = $._jobs[jobId];
-
-        if (job.status == Status.None) revert JobNotFound(jobId);
-        if (job.status != Status.Open) revert InvalidStatus(jobId, Status.Open, job.status);
-        if (msg.sender != job.client && msg.sender != job.provider) {
-            revert NotClientOrProvider();
-        }
-
-        bytes memory hookData = abi.encode(amount, optParams);
-
-        _callHook(job.hook, jobId, this.setBudget.selector, hookData, true);
-
-        job.budget = amount;
-
-        _callHook(job.hook, jobId, this.setBudget.selector, hookData, false);
-
-        emit BudgetSet(jobId, amount);
-    }
-
-    // ============================================================
-    //  Core Functions — Funding
-    // ============================================================
-
-    /**
-     * @notice Fund the job escrow
-     * @param jobId Job ID
-     * @param expectedBudget Expected budget (front-running protection)
-     * @param optParams Optional parameters forwarded to hook
-     */
-    function fund(
-        uint256 jobId,
-        uint256 expectedBudget,
-        bytes calldata optParams
-    ) external nonReentrant {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        Job storage job = $._jobs[jobId];
-
-        if (job.status == Status.None) revert JobNotFound(jobId);
-        if (job.status != Status.Open) revert InvalidStatus(jobId, Status.Open, job.status);
-        if (msg.sender != job.client) revert NotClient();
-        if (job.provider == address(0)) revert ProviderNotSet();
-        if (job.budget == 0) revert BudgetNotSet();
-        if (job.budget != expectedBudget) revert BudgetMismatch();
-        if (job.budget < $._minBudget) revert BudgetTooLow(job.budget, $._minBudget);
-
-        _callHook(job.hook, jobId, this.fund.selector, optParams, true);
-
-        job.status = Status.Funded;
-        $._totalEscrowed += job.budget;
-        $._paymentToken.safeTransferFrom(msg.sender, address(this), job.budget);
-
-        _callHook(job.hook, jobId, this.fund.selector, optParams, false);
-
-        emit JobFunded(jobId, msg.sender, job.budget);
-    }
-
-    // ============================================================
-    //  Core Functions — Submission
-    // ============================================================
-
-    /**
-     * @notice Provider submits work for evaluation
-     * @param jobId Job ID
-     * @param deliverable Reference to work (hash, CID, etc.)
-     * @param optParams Optional parameters forwarded to hook
-     */
-    function submit(
-        uint256 jobId,
-        bytes32 deliverable,
-        bytes calldata optParams
-    ) external nonReentrant {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        Job storage job = $._jobs[jobId];
-
-        if (job.status == Status.None) revert JobNotFound(jobId);
-        if (job.status != Status.Funded) revert InvalidStatus(jobId, Status.Funded, job.status);
-        if (msg.sender != job.provider) revert NotProvider();
-
-        bytes memory hookData = abi.encode(deliverable, optParams);
-
-        _callHook(job.hook, jobId, this.submit.selector, hookData, true);
-
-        job.deliverable = deliverable;
-        job.status = Status.Submitted;
-
-        _callHook(job.hook, jobId, this.submit.selector, hookData, false);
-
-        emit JobSubmitted(jobId, msg.sender, deliverable);
-    }
-
-    // ============================================================
-    //  Core Functions — Evaluation
-    // ============================================================
-
-    /**
-     * @notice Evaluator marks job as completed, releasing payment to provider
-     * @param jobId Job ID
-     * @param reason Optional attestation hash
-     * @param optParams Optional parameters forwarded to hook
-     */
-    function complete(
-        uint256 jobId,
-        bytes32 reason,
-        bytes calldata optParams
-    ) external nonReentrant {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        Job storage job = $._jobs[jobId];
-
-        if (job.status == Status.None) revert JobNotFound(jobId);
-        if (job.status != Status.Submitted) {
-            revert InvalidStatus(jobId, Status.Submitted, job.status);
-        }
-        if (msg.sender != job.evaluator) revert NotEvaluator();
-
-        bytes memory hookData = abi.encode(reason, optParams);
-
-        _callHook(job.hook, jobId, this.complete.selector, hookData, true);
-
-        job.status = Status.Completed;
-        $._totalEscrowed -= job.budget;
-
-        // Transfer full budget to provider (pure EIP-8183, no platform fee)
-        _safePayoutOrPend($, job.provider, job.budget, jobId);
-
-        _callHook(job.hook, jobId, this.complete.selector, hookData, false);
-
-        emit JobCompleted(jobId, msg.sender, reason);
-        emit PaymentReleased(jobId, job.provider, job.budget);
-    }
-
-    /**
-     * @notice Reject the job, refunding client
-     * @dev Client can reject when Open; Evaluator can reject when Funded or Submitted
-     * @param jobId Job ID
-     * @param reason Optional rejection reason
-     * @param optParams Optional parameters forwarded to hook
-     */
-    function reject(
-        uint256 jobId,
-        bytes32 reason,
-        bytes calldata optParams
-    ) external nonReentrant {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        Job storage job = $._jobs[jobId];
-
-        if (job.status == Status.None) revert JobNotFound(jobId);
-
-        bytes memory hookData = abi.encode(reason, optParams);
-
-        if (job.status == Status.Open) {
-            // Only client can reject when Open
-            if (msg.sender != job.client) revert NotClient();
-
-            _callHook(job.hook, jobId, this.reject.selector, hookData, true);
-
-            job.status = Status.Rejected;
-
-            _callHook(job.hook, jobId, this.reject.selector, hookData, false);
-        } else if (job.status == Status.Funded || job.status == Status.Submitted) {
-            // Only evaluator can reject when Funded or Submitted
-            if (msg.sender != job.evaluator) revert NotEvaluator();
-
-            _callHook(job.hook, jobId, this.reject.selector, hookData, true);
-
-            job.status = Status.Rejected;
-            $._totalEscrowed -= job.budget;
-
-            // Refund escrowed funds
-            _safePayoutOrPend($, job.client, job.budget, jobId);
-
-            _callHook(job.hook, jobId, this.reject.selector, hookData, false);
-
-            emit Refunded(jobId, job.client, job.budget);
-        } else {
-            revert NotRefundable();
-        }
-
-        emit JobRejected(jobId, msg.sender, reason);
-    }
-
-    // ============================================================
-    //  Core Functions — Timeout Refund (NOT hookable)
-    // ============================================================
-
-    /**
-     * @notice Claim refund after job expiry
-     * @dev Anyone can call to trigger refund. NOT hookable (safety mechanism).
-     * @param jobId Job ID
-     */
-    function claimRefund(uint256 jobId) external nonReentrant {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        Job storage job = $._jobs[jobId];
-
-        if (job.status == Status.None) revert JobNotFound(jobId);
-        if (job.status != Status.Funded && job.status != Status.Submitted) {
-            revert NotRefundable();
-        }
-        if (block.timestamp < job.expiredAt) revert NotExpired();
-
-        job.status = Status.Expired;
-        $._totalEscrowed -= job.budget;
-        _safePayoutOrPend($, job.client, job.budget, jobId);
-
-        emit JobExpired(jobId);
-        emit Refunded(jobId, job.client, job.budget);
-    }
-
-    // ============================================================
-    //  Pending Withdrawals
-    // ============================================================
-
-    /**
-     * @notice Claim pending withdrawals
-     */
-    function claimPending() external nonReentrant {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        uint256 amount = $._pendingWithdrawals[msg.sender];
-        if (amount == 0) revert NothingToClaim();
-
-        $._pendingWithdrawals[msg.sender] = 0;
-        $._totalPendingWithdrawals -= amount;
-        $._paymentToken.safeTransfer(msg.sender, amount);
-
-        emit PendingClaimed(msg.sender, amount);
-    }
-
-    function pendingWithdrawals(address account) external view returns (uint256) {
-        return _getERC8183Storage()._pendingWithdrawals[account];
-    }
+    function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
 
     // ============================================================
     //  Admin Functions
     // ============================================================
 
-    function setMinBudget(uint256 minBudget_) external onlyOwner {
-        ERC8183Storage storage $ = _getERC8183Storage();
-        uint256 oldMinBudget = $._minBudget;
-        $._minBudget = minBudget_;
-        emit MinBudgetUpdated(oldMinBudget, minBudget_);
+    function setPlatformFee(uint256 feeBP_, address treasury_) external onlyRole(ADMIN_ROLE) {
+        if (treasury_ == address(0)) revert ZeroAddress();
+        if (feeBP_ + evaluatorFeeBP > 10000) revert FeesTooHigh();
+        platformFeeBP = feeBP_;
+        platformTreasury = treasury_;
     }
 
-    /**
-     * @notice Update the payment token address
-     * @dev Only callable by owner. Use with caution:
-     *      - Existing funded/submitted jobs will still use the old token for payouts
-     *      - New jobs will use the new token
-     *      - Ensure no active jobs exist before changing token in production
-     * @param newToken New BEP20 payment token address
-     */
-    function setPaymentToken(address newToken) external onlyOwner {
-        require(newToken != address(0), "invalid token");
-        ERC8183Storage storage $ = _getERC8183Storage();
-        if ($._totalEscrowed != 0) revert ActiveEscrowsExist();
-        if ($._totalPendingWithdrawals != 0) revert PendingWithdrawalsExist();
-        address oldToken = address($._paymentToken);
-        $._paymentToken = IERC20(newToken);
-        emit PaymentTokenUpdated(oldToken, newToken);
+    function setEvaluatorFee(uint256 feeBP_) external onlyRole(ADMIN_ROLE) {
+        if (feeBP_ + platformFeeBP > 10000) revert FeesTooHigh();
+        evaluatorFeeBP = feeBP_;
     }
 
-    function rescueBEP20(address token, address to, uint256 amount) external onlyOwner {
-        require(to != address(0), "invalid address");
-        ERC8183Storage storage $ = _getERC8183Storage();
-        if (token == address($._paymentToken)) {
-            uint256 balance = $._paymentToken.balanceOf(address(this));
-            uint256 excess = balance > $._totalEscrowed ? balance - $._totalEscrowed : 0;
-            if (amount > excess) revert RescueExceedsExcess(amount, excess);
-        }
-        IERC20(token).safeTransfer(to, amount);
-        emit TokensRescued(token, to, amount);
+    function setHookWhitelist(address hook, bool status) external onlyRole(ADMIN_ROLE) {
+        if (hook == address(0)) revert ZeroAddress();
+        whitelistedHooks[hook] = status;
+        emit HookWhitelistUpdated(hook, status);
+    }
+
+    function pause() external onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        _unpause();
     }
 
     // ============================================================
-    //  Internal — Hook Execution
+    //  Hook Execution (gas-limited per SHOULD)
     // ============================================================
 
-    function _callHook(
-        address hook,
-        uint256 jobId,
-        bytes4 selector,
-        bytes memory data,
-        bool isBefore
-    ) internal {
+    function _beforeHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
         if (hook == address(0)) return;
-
-        bytes memory payload = isBefore
-            ? abi.encodeCall(IERC8183Hook.beforeAction, (jobId, selector, data))
-            : abi.encodeCall(IERC8183Hook.afterAction, (jobId, selector, data));
-
-        (bool success, bytes memory returnData) = hook.call{gas: HOOK_GAS_LIMIT}(payload);
-
+        (bool success, bytes memory returnData) = hook.call{gas: HOOK_GAS_LIMIT}(
+            abi.encodeCall(IACPHook.beforeAction, (jobId, selector, data))
+        );
         if (!success) {
             if (returnData.length > 0) {
-                assembly {
-                    revert(add(returnData, 32), mload(returnData))
-                }
+                assembly { revert(add(returnData, 32), mload(returnData)) }
+            }
+            revert HookCallFailed();
+        }
+    }
+
+    function _afterHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
+        if (hook == address(0)) return;
+        (bool success, bytes memory returnData) = hook.call{gas: HOOK_GAS_LIMIT}(
+            abi.encodeCall(IACPHook.afterAction, (jobId, selector, data))
+        );
+        if (!success) {
+            if (returnData.length > 0) {
+                assembly { revert(add(returnData, 32), mload(returnData)) }
             }
             revert HookCallFailed();
         }
     }
 
     // ============================================================
-    //  Internal — Safe Payout
+    //  Core Functions
     // ============================================================
 
-    function _safePayoutOrPend(
-        ERC8183Storage storage $,
-        address recipient,
-        uint256 amount,
-        uint256 jobId
-    ) internal {
-        if (amount == 0) return;
-
-        // Low-level call handles non-standard tokens (e.g., USDT that returns no bool)
-        (bool success, bytes memory returnData) = address($._paymentToken).call(
-            abi.encodeCall(IERC20.transfer, (recipient, amount))
-        );
-
-        if (success && (returnData.length == 0 || abi.decode(returnData, (bool)))) {
-            // Transfer succeeded
-        } else {
-            $._pendingWithdrawals[recipient] += amount;
-            $._totalPendingWithdrawals += amount;
-            emit TransferFailed(recipient, amount, jobId);
+    function createJob(
+        address provider, address evaluator, uint256 expiredAt,
+        string calldata description, address hook
+    ) external nonReentrant whenNotPaused returns (uint256) {
+        if (evaluator == address(0)) revert ZeroAddress();
+        if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
+        if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
+        if (hook != address(0)) {
+            if (!ERC165Checker.supportsInterface(hook, type(IACPHook).interfaceId))
+                revert InvalidJob();
         }
+        uint256 jobId = ++jobCounter;
+        jobs[jobId] = Job({
+            id: jobId,
+            client: _msgSender(),
+            provider: provider,
+            evaluator: evaluator,
+            description: description,
+            budget: 0,
+            expiredAt: expiredAt,
+            status: JobStatus.Open,
+            hook: hook
+        });
+        emit JobCreated(jobId, _msgSender(), provider, evaluator, expiredAt, hook);
+        return jobId;
+    }
+
+    function setProvider(uint256 jobId, address provider_, bytes calldata optParams)
+        external nonReentrant whenNotPaused
+    {
+        Job storage job = jobs[jobId];
+        if (job.id == 0) revert InvalidJob();
+        if (job.status != JobStatus.Open) revert WrongStatus();
+        if (_msgSender() != job.client) revert Unauthorized();
+        if (job.provider != address(0)) revert WrongStatus();
+        if (provider_ == address(0)) revert ZeroAddress();
+
+        bytes memory hookData = abi.encode(provider_, optParams);
+        _beforeHook(job.hook, jobId, this.setProvider.selector, hookData);
+        job.provider = provider_;
+        _afterHook(job.hook, jobId, this.setProvider.selector, hookData);
+
+        emit ProviderSet(jobId, provider_);
+    }
+
+    function setBudget(uint256 jobId, uint256 amount, bytes calldata optParams)
+        external nonReentrant whenNotPaused
+    {
+        Job storage job = jobs[jobId];
+        if (job.id == 0) revert InvalidJob();
+        if (job.status != JobStatus.Open) revert WrongStatus();
+        if (_msgSender() != job.client && _msgSender() != job.provider) revert Unauthorized();
+
+        bytes memory hookData = abi.encode(amount, optParams);
+        _beforeHook(job.hook, jobId, this.setBudget.selector, hookData);
+        job.budget = amount;
+        jobHasBudget[jobId] = true;
+        _afterHook(job.hook, jobId, this.setBudget.selector, hookData);
+
+        emit BudgetSet(jobId, amount);
+    }
+
+    function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams)
+        external nonReentrant whenNotPaused
+    {
+        _fund(jobId, expectedBudget, optParams);
+    }
+
+    function fundWithPermit(
+        uint256 jobId, uint256 expectedBudget, bytes calldata optParams,
+        uint256 deadline, uint8 v, bytes32 r, bytes32 s
+    ) external nonReentrant whenNotPaused {
+        Job storage job = jobs[jobId];
+        if (job.id == 0) revert InvalidJob();
+        IERC20Permit(address(paymentToken)).permit(
+            _msgSender(), address(this), expectedBudget, deadline, v, r, s
+        );
+        _fund(jobId, expectedBudget, optParams);
+    }
+
+    function _fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) internal {
+        Job storage job = jobs[jobId];
+        if (job.id == 0) revert InvalidJob();
+        if (job.status != JobStatus.Open) revert WrongStatus();
+        if (_msgSender() != job.client) revert Unauthorized();
+        if (job.provider == address(0)) revert ProviderNotSet();
+        if (job.budget == 0) revert ZeroBudget();
+        if (job.budget != expectedBudget) revert BudgetMismatch();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
+
+        _beforeHook(job.hook, jobId, this.fund.selector, optParams);
+        job.status = JobStatus.Funded;
+        paymentToken.safeTransferFrom(job.client, address(this), job.budget);
+        _afterHook(job.hook, jobId, this.fund.selector, optParams);
+
+        emit JobFunded(jobId, job.client, job.budget);
+    }
+
+    function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams)
+        external nonReentrant whenNotPaused
+    {
+        Job storage job = jobs[jobId];
+        if (job.id == 0) revert InvalidJob();
+        if (job.status != JobStatus.Funded) revert WrongStatus();
+        if (_msgSender() != job.provider) revert Unauthorized();
+
+        bytes memory hookData = abi.encode(deliverable, optParams);
+        _beforeHook(job.hook, jobId, this.submit.selector, hookData);
+        job.status = JobStatus.Submitted;
+        _afterHook(job.hook, jobId, this.submit.selector, hookData);
+
+        emit JobSubmitted(jobId, job.provider, deliverable);
+    }
+
+    function complete(uint256 jobId, bytes32 reason, bytes calldata optParams)
+        external nonReentrant whenNotPaused
+    {
+        Job storage job = jobs[jobId];
+        if (job.id == 0) revert InvalidJob();
+        if (job.status != JobStatus.Submitted) revert WrongStatus();
+        if (_msgSender() != job.evaluator) revert Unauthorized();
+
+        bytes memory hookData = abi.encode(reason, optParams);
+        _beforeHook(job.hook, jobId, this.complete.selector, hookData);
+        job.status = JobStatus.Completed;
+
+        uint256 amount = job.budget;
+        uint256 platformFee = (amount * platformFeeBP) / 10000;
+        uint256 evalFee = (amount * evaluatorFeeBP) / 10000;
+        uint256 net = amount - platformFee - evalFee;
+
+        if (platformFee > 0) {
+            paymentToken.safeTransfer(platformTreasury, platformFee);
+        }
+        if (evalFee > 0) {
+            paymentToken.safeTransfer(job.evaluator, evalFee);
+            emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
+        }
+        if (net > 0) {
+            paymentToken.safeTransfer(job.provider, net);
+        }
+
+        _afterHook(job.hook, jobId, this.complete.selector, hookData);
+
+        emit JobCompleted(jobId, job.evaluator, reason);
+        emit PaymentReleased(jobId, job.provider, net);
+        emit ReputationSignal(jobId, job.provider, "provider", int8(1));
+    }
+
+    function reject(uint256 jobId, bytes32 reason, bytes calldata optParams)
+        external nonReentrant whenNotPaused
+    {
+        Job storage job = jobs[jobId];
+        if (job.id == 0) revert InvalidJob();
+
+        if (job.status == JobStatus.Open) {
+            if (_msgSender() != job.client) revert Unauthorized();
+        } else if (job.status == JobStatus.Funded || job.status == JobStatus.Submitted) {
+            if (_msgSender() != job.evaluator) revert Unauthorized();
+        } else {
+            revert WrongStatus();
+        }
+
+        bytes memory hookData = abi.encode(reason, optParams);
+        _beforeHook(job.hook, jobId, this.reject.selector, hookData);
+        JobStatus prev = job.status;
+        job.status = JobStatus.Rejected;
+
+        if ((prev == JobStatus.Funded || prev == JobStatus.Submitted) && job.budget > 0) {
+            paymentToken.safeTransfer(job.client, job.budget);
+            emit Refunded(jobId, job.client, job.budget);
+            emit ReputationSignal(jobId, job.provider, "provider", int8(-1));
+        }
+
+        _afterHook(job.hook, jobId, this.reject.selector, hookData);
+
+        emit JobRejected(jobId, _msgSender(), reason);
+    }
+
+    // claimRefund: NOT pausable, NOT hookable (guaranteed recovery path)
+    function claimRefund(uint256 jobId) external nonReentrant {
+        Job storage job = jobs[jobId];
+        if (job.id == 0) revert InvalidJob();
+        if (job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
+            revert WrongStatus();
+        if (block.timestamp < job.expiredAt) revert WrongStatus();
+
+        job.status = JobStatus.Expired;
+        if (job.budget > 0) {
+            paymentToken.safeTransfer(job.client, job.budget);
+            emit Refunded(jobId, job.client, job.budget);
+        }
+        emit JobExpired(jobId);
+        emit ReputationSignal(jobId, job.provider, "provider", int8(0));
+    }
+
+    function getJob(uint256 jobId) external view returns (Job memory) {
+        return jobs[jobId];
     }
 }
