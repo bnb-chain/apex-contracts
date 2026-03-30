@@ -165,7 +165,8 @@ contract APEXEvaluatorUpgradeable is
     /// @dev v2: Fixed IOptimisticOracleV3.Assertion struct to match actual OOv3 return type
     /// @dev v3: Audit remediation — M01 try-catch, M03 dispute-win bond recovery,
     ///          M04 per-job bond caching, M05 pendingAssertions guard, I01/I05
-    uint256 public constant VERSION = 3;
+    /// @dev v4: Issue #13 — restrict initiateAssertion() to job participants + owner
+    uint256 public constant VERSION = 4;
 
     // keccak256(abi.encode(uint256(keccak256("apexevaluator.storage")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant EVALUATOR_STORAGE_LOCATION =
@@ -202,6 +203,7 @@ contract APEXEvaluatorUpgradeable is
     error OnlyERC8183();
     error NoAssertionForJob(uint256 jobId);
     error PendingAssertionsExist(uint256 count);
+    error CallerNotAllowed(address caller);
 
     // ============================================================
     //  Constructor (disabled for proxy)
@@ -376,6 +378,11 @@ contract APEXEvaluatorUpgradeable is
     // ============================================================
 
     function initiateAssertion(uint256 jobId) external nonReentrant whenNotPaused {
+        EvaluatorStorage storage $ = _getEvaluatorStorage();
+        IAgenticCommerce.Job memory job = $.erc8183.getJob(jobId);
+        if (msg.sender != owner() && msg.sender != job.provider && msg.sender != job.client) {
+            revert CallerNotAllowed(msg.sender);
+        }
         _initiateAssertionInternal(jobId);
     }
 
