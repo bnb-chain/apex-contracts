@@ -7,7 +7,8 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "./IERC8183Hook.sol";
+import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import "./IACPHook.sol";
 import "./IAPEXEvaluator.sol";
 
 /**
@@ -15,8 +16,7 @@ import "./IAPEXEvaluator.sol";
  * @notice Interface for the AgenticCommerceUpgradeable contract
  */
 interface IAgenticCommerce {
-    enum Status {
-        None,
+    enum JobStatus {
         Open,
         Funded,
         Submitted,
@@ -26,21 +26,21 @@ interface IAgenticCommerce {
     }
 
     struct Job {
+        uint256 id;
         address client;
         address provider;
         address evaluator;
-        address hook;
+        string description;
         uint256 budget;
         uint256 expiredAt;
-        Status status;
-        bytes32 deliverable;
-        string description;
+        JobStatus status;
+        address hook;
     }
 
     function getJob(uint256 jobId) external view returns (Job memory);
     function complete(uint256 jobId, bytes32 reason, bytes calldata optParams) external;
     function reject(uint256 jobId, bytes32 reason, bytes calldata optParams) external;
-    function paymentToken() external view returns (address);
+    function paymentToken() external view returns (IERC20);
 }
 
 /**
@@ -104,7 +104,7 @@ interface IOptimisticOracleV3 {
  * Key Features:
  *   - UUPS upgradeable with stable proxy address
  *   - ERC-7201 namespaced storage for safe upgrades
- *   - Implements IERC8183Hook: afterAction auto-triggers assertion on submit
+ *   - Implements IACPHook: afterAction auto-triggers assertion on submit
  *   - Pre-funded bond model: anyone can deposit, contract pays bond
  *   - Disputed state tracking
  *   - Query functions for UI integration
@@ -116,7 +116,7 @@ interface IOptimisticOracleV3 {
  *   4. After liveness, anyone calls settleJob() → complete/reject
  */
 contract APEXEvaluatorUpgradeable is
-    IERC8183Hook,
+    IACPHook,
     IAPEXEvaluator,
     OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
@@ -133,6 +133,11 @@ contract APEXEvaluatorUpgradeable is
 
     bytes4 private constant SUBMIT_SELECTOR =
         bytes4(keccak256("submit(uint256,bytes32,bytes)"));
+
+    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
+        return interfaceId == type(IACPHook).interfaceId
+            || interfaceId == type(IERC165).interfaceId;
+    }
 
     // ============================================================
     //  Storage (ERC-7201 Namespaced)
@@ -153,6 +158,7 @@ contract APEXEvaluatorUpgradeable is
         mapping(bytes32 => bool) assertionExists;  // Fix jobId=0 edge case
         mapping(uint256 => uint256) jobBondAmount;  // Cached bond per job (M04)
         uint256 pendingAssertions;                   // Active assertion counter (M05)
+        mapping(uint256 => bytes32) jobDeliverable;
     }
 
     /// @notice Contract version for upgrade tracking
@@ -301,7 +307,7 @@ contract APEXEvaluatorUpgradeable is
     }
 
     // ============================================================
-    //  IERC8183Hook Implementation
+    //  IACPHook Implementation
     // ============================================================
 
     function beforeAction(
@@ -322,34 +328,27 @@ contract APEXEvaluatorUpgradeable is
         if (msg.sender != address($.erc8183)) revert OnlyERC8183();
 
         if (selector == SUBMIT_SELECTOR) {
-            _tryStoreDataUrl(jobId, data);
+            // data = abi.encode(bytes32 deliverable, bytes optParams)
+            (bytes32 deliverable, bytes memory optParams) = abi.decode(data, (bytes32, bytes));
+            $.jobDeliverable[jobId] = deliverable;
+
+            // Store sanitized dataUrl from optParams
+            if (optParams.length > 0 && optParams.length <= 256) {
+                $.jobDataUrl[jobId] = _sanitizeDataUrl(string(optParams));
+            }
+
             _initiateAssertionInternal(jobId);
         }
     }
 
-    function _tryStoreDataUrl(uint256 jobId, bytes calldata data) internal {
-        if (data.length < 96) return;
-
-        uint256 offset;
-        assembly {
-            offset := calldataload(add(data.offset, 32))
+    function _sanitizeDataUrl(string memory url) internal pure returns (string memory) {
+        bytes memory b = bytes(url);
+        for (uint256 i = 0; i < b.length; i++) {
+            if (b[i] == "[" || b[i] == "]") {
+                b[i] = "_";
+            }
         }
-        if (offset != 64) return;
-
-        uint256 len;
-        assembly {
-            len := calldataload(add(data.offset, 64))
-        }
-        if (len == 0 || len > 256) return;
-
-        if (data.length < 96 + len) return;
-
-        // Extract optParams using calldatacopy (handles >32 bytes correctly)
-        bytes memory optParams = new bytes(len);
-        assembly {
-            calldatacopy(add(optParams, 32), add(data.offset, 96), len)
-        }
-        _getEvaluatorStorage().jobDataUrl[jobId] = string(optParams);
+        return string(b);
     }
 
     // ============================================================
@@ -403,9 +402,7 @@ contract APEXEvaluatorUpgradeable is
         uint256 jobId = $.assertionToJob[assertionId];
 
         // Decrement pending assertions counter (M05)
-        if ($.pendingAssertions > 0) {
-            $.pendingAssertions--;
-        }
+        $.pendingAssertions--;
 
         // Bond accounting: use cached bond amount to avoid desync (M04)
         uint256 cachedBond = $.jobBondAmount[jobId];
@@ -629,7 +626,7 @@ contract APEXEvaluatorUpgradeable is
         IAgenticCommerce.Job memory job = $.erc8183.getJob(jobId);
 
         if (msg.sender != address($.erc8183)) {
-            if (job.status != IAgenticCommerce.Status.Submitted) {
+            if (job.status != IAgenticCommerce.JobStatus.Submitted) {
                 revert JobNotSubmitted(jobId);
             }
         }
@@ -679,8 +676,8 @@ contract APEXEvaluatorUpgradeable is
      */
     function _getPaymentToken() internal view returns (address) {
         EvaluatorStorage storage $ = _getEvaluatorStorage();
-        try $.erc8183.paymentToken() returns (address token) {
-            return token;
+        try $.erc8183.paymentToken() returns (IERC20 token) {
+            return address(token);
         } catch {
             return address(0);
         }
@@ -744,14 +741,14 @@ contract APEXEvaluatorUpgradeable is
         );
     }
 
-    function _buildClaimResponse(uint256 jobId, IAgenticCommerce.Job memory job) internal view returns (bytes memory) {
+    function _buildClaimResponse(uint256 jobId, IAgenticCommerce.Job memory /* job */) internal view returns (bytes memory) {
         EvaluatorStorage storage $ = _getEvaluatorStorage();
         string memory dataUrl = $.jobDataUrl[jobId];
         bool hasDataUrl = bytes(dataUrl).length > 0;
 
         return abi.encodePacked(
             ". [RESPONSE] ",
-            "Deliverable Hash: ", _bytes32ToHex(job.deliverable),
+            "Deliverable Hash: ", _bytes32ToHex(_getEvaluatorStorage().jobDeliverable[jobId]),
             hasDataUrl ? ". Deliverable URL: " : "",
             hasDataUrl ? dataUrl : "",
             ". [VERIFY] ",

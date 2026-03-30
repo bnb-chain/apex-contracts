@@ -27,19 +27,19 @@ Client                    Provider                 Evaluator
 
 ```
 Open ──► Funded ──► Submitted ──┬── Completed (provider paid)
-                                ├── Rejected  (client refunded)
-                                └── Expired   (client refunded)
+ │                              ├── Rejected  (client refunded)
+ └── Rejected (client only)     └── Expired   (client refunded)
 ```
 
 ## Contracts
 
 | Contract | Purpose |
 |---|---|
-| [`AgenticCommerceUpgradeable`](contracts/core/AgenticCommerceUpgradeable.sol) | Core escrow — job creation, funding, submission, payout, and refund |
-| [`APEXEvaluatorUpgradeable`](contracts/evaluator/APEXEvaluatorUpgradeable.sol) | UMA OOv3-based evaluator — auto-asserts on submission, settles after liveness period |
-| [`IERC8183Hook`](contracts/interfaces/IERC8183Hook.sol) | Hook interface — `beforeAction` / `afterAction` callbacks per job action |
-| [`BaseERC8183Hook`](contracts/hooks/BaseERC8183Hook.sol) | Convenience base for building custom hooks |
-| [`IAPEXEvaluator`](contracts/interfaces/IAPEXEvaluator.sol) | Evaluator interface |
+| [`AgenticCommerceUpgradeable`](contracts/AgenticCommerceUpgradeable.sol) | Core escrow — job creation, funding, submission, payout, and refund |
+| [`APEXEvaluatorUpgradeable`](contracts/APEXEvaluatorUpgradeable.sol) | UMA OOv3-based evaluator — auto-asserts on submission, settles after liveness period |
+| [`IACPHook`](contracts/IACPHook.sol) | Hook interface — `beforeAction` / `afterAction` callbacks per job action |
+| [`BaseACPHook`](contracts/BaseACPHook.sol) | Convenience base for building custom hooks |
+| [`IAPEXEvaluator`](contracts/IAPEXEvaluator.sol) | Evaluator interface |
 
 ### Directory Layout
 
@@ -47,9 +47,9 @@ Open ──► Funded ──► Submitted ──┬── Completed (provider pa
 contracts/
 ├── AgenticCommerceUpgradeable.sol  # Core escrow
 ├── APEXEvaluatorUpgradeable.sol    # UMA OOv3 evaluator
-├── IERC8183Hook.sol                # Hook interface
+├── IACPHook.sol                    # Hook interface
 ├── IAPEXEvaluator.sol              # Evaluator interface
-├── BaseERC8183Hook.sol             # Hook base class
+├── BaseACPHook.sol                 # Hook base class
 ├── ERC1967Proxy.sol                # UUPS proxy
 ├── MockERC20.sol                   # Test mock
 └── MockOptimisticOracleV3.sol      # Test mock
@@ -73,12 +73,12 @@ npm install
 npx hardhat compile
 ```
 
-Compiler settings: `Solidity 0.8.24 | Optimizer: 200 runs | viaIR: true | EVM: shanghai`
+Compiler settings: `Solidity 0.8.28 | Optimizer: 200 runs | viaIR: true | EVM: cancun`
 
 ## Testing
 
 ```bash
-npm test                    # All tests (81 tests)
+npm test                    # All tests (109 tests)
 npm run test:commerce       # AgenticCommerce unit tests
 npm run test:evaluator      # APEXEvaluator unit tests
 npm run test:upgrades       # UUPS upgrade tests
@@ -152,20 +152,38 @@ Both core contracts use the [UUPS proxy pattern](https://docs.openzeppelin.com/c
 5. Update `ACP_IMPL_ADDRESS` / `OOV3_EVALUATOR_IMPL_ADDRESS` in `.env` and `deployments/bsc-testnet.json`
 
 **Critical constraints for storage compatibility:**
-- ERC-7201 namespace IDs (`"erc8183.protocol.storage"`, `"apexevaluator.storage"`) must never change
+- `AgenticCommerceUpgradeable` uses flat upgradeable storage (no ERC-7201 namespace) — variable declaration order must never change
+- `APEXEvaluatorUpgradeable` uses ERC-7201 namespaced storage (`"apexevaluator.storage"`) — this namespace ID must never change
 - Storage struct field order must be preserved — only append new fields at the end
 - OpenZeppelin version must stay at `5.4.0` (pinned in `package.json`)
-- Compiler settings must match: `Solidity 0.8.24 | optimizer: 200 runs | viaIR: true | EVM: shanghai`
+- Compiler settings must match: `Solidity 0.8.28 | optimizer: 200 runs | viaIR: true | EVM: cancun`
 
 ### Hook System
 
-Each job can optionally specify a hook contract implementing `IERC8183Hook`. The hook receives `beforeAction` and `afterAction` callbacks for `setProvider`, `setBudget`, `fund`, `submit`, `complete`, and `reject`. The `claimRefund` action is deliberately **not** hookable as a safety mechanism.
+Each job can optionally specify a hook contract implementing `IACPHook`. The hook receives `beforeAction` and `afterAction` callbacks for `setProvider`, `setBudget`, `fund`, `submit`, `complete`, and `reject`. The `claimRefund` action is deliberately **not** hookable as a safety mechanism.
 
-The `APEXEvaluatorUpgradeable` contract itself implements `IERC8183Hook` — when set as a job's hook, it auto-asserts job completion upon submission, enabling fully automated evaluation via UMA's optimistic oracle.
+The `APEXEvaluatorUpgradeable` contract itself implements `IACPHook` — when set as a job's hook, it auto-asserts job completion upon submission, enabling fully automated evaluation via UMA's optimistic oracle.
 
-### Safe Payout
+### Fee Mechanism
 
-If a direct ERC-20 transfer to the provider fails (e.g., a non-receiving contract), the amount is stored as a pending withdrawal that the recipient can claim later via `claimPending()`.
+`complete()` deducts two optional fees from the escrowed budget before paying the provider:
+
+- **Platform fee** (`platformFeeBP`) — sent to `platformTreasury`. Set via `setPlatformFee(feeBP, treasury)`.
+- **Evaluator fee** (`evaluatorFeeBP`) — sent to the job's evaluator address. Set via `setEvaluatorFee(feeBP)`.
+
+Both fees are in basis points (1 BP = 0.01%). Combined total must not exceed 10000 BP (100%). Fees are only deducted on `complete()` — never on refunds or rejections.
+
+### Pause / Unpause
+
+`ADMIN_ROLE` can call `pause()` to halt all state-changing operations in an emergency. All core functions (`createJob`, `fund`, `submit`, `complete`, `reject`, etc.) check `whenNotPaused`.
+
+`claimRefund()` is deliberately **exempt from pause** — users must always be able to recover funds after expiry, so the pause mechanism itself cannot become a fund-locking vector.
+
+### Meta-Transactions (ERC-2771) and Permit (ERC-2612)
+
+The contract inherits `ERC2771Context`. All authorization checks use `_msgSender()` instead of `msg.sender`, enabling gasless execution via a trusted forwarder. AI agents can sign intents off-chain and have a facilitator relay the transaction on-chain — no gas required from the agent.
+
+`fundWithPermit()` combines ERC-2612 token approval and funding in a single transaction, eliminating the separate `approve()` call.
 
 ## Contributing
 

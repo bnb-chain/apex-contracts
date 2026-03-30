@@ -41,3 +41,6 @@ Thumbs.db
 
 # Claude Code (local config only, settings.json can be shared)
 .claude/settings.local.json
+
+_tmp/
+.gstack/
