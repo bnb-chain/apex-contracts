@@ -5,7 +5,7 @@ import type { HardhatUserConfig } from "hardhat/config";
 import hardhatToolboxViemPlugin from "@nomicfoundation/hardhat-toolbox-viem";
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || ".env" });
 
 const config: HardhatUserConfig = {
   plugins: [hardhatToolboxViemPlugin],

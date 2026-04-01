@@ -149,7 +149,7 @@ contract APEXEvaluatorUpgradeable is
         IOptimisticOracleV3 oov3;
         IERC20 bondToken;
         uint64 liveness;
-        uint256 bondBalance;
+        uint256 bondBalance;                         // Deprecated in v5
         mapping(bytes32 => uint256) assertionToJob;
         mapping(uint256 => bytes32) jobToAssertion;
         mapping(uint256 => bool) jobAssertionInitiated;
@@ -159,6 +159,8 @@ contract APEXEvaluatorUpgradeable is
         mapping(uint256 => uint256) jobBondAmount;  // Cached bond per job (M04)
         uint256 pendingAssertions;                   // Active assertion counter (M05)
         mapping(uint256 => bytes32) jobDeliverable;
+        mapping(uint256 => address) jobAsserter;     // Who paid the bond (v5)
+        uint256 totalLockedBond;                     // Sum of all in-flight bonds (v5)
     }
 
     /// @notice Contract version for upgrade tracking
@@ -166,7 +168,9 @@ contract APEXEvaluatorUpgradeable is
     /// @dev v3: Audit remediation — M01 try-catch, M03 dispute-win bond recovery,
     ///          M04 per-job bond caching, M05 pendingAssertions guard, I01/I05
     /// @dev v4: Issue #13 — restrict initiateAssertion() to job participants + owner
-    uint256 public constant VERSION = 4;
+    /// @dev v5: Agent-paid bond — provider calls initiateAssertion() and pays bond directly
+    ///          via transferFrom; evaluator bond pool deprecated
+    uint256 public constant VERSION = 5;
 
     // keccak256(abi.encode(uint256(keccak256("apexevaluator.storage")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 private constant EVALUATOR_STORAGE_LOCATION =
@@ -184,7 +188,7 @@ contract APEXEvaluatorUpgradeable is
 
     // Events inherited from IAPEXEvaluator: AssertionInitiated, AssertionResolved,
     // AssertionDisputed, BondDeposited, BondWithdrawn
-    event BondReturned(bytes32 indexed assertionId, uint256 amount);
+    event BondReturned(bytes32 indexed assertionId, uint256 amount); // Deprecated in v5
     event LivenessUpdated(uint64 oldLiveness, uint64 newLiveness);
     event ERC8183Updated(address indexed oldErc8183, address indexed newErc8183);
     event OOv3Updated(address indexed oldOov3, address indexed newOov3);
@@ -308,6 +312,14 @@ contract APEXEvaluatorUpgradeable is
         return _getEvaluatorStorage().pendingAssertions;
     }
 
+    function jobAsserter(uint256 jobId) external view returns (address) {
+        return _getEvaluatorStorage().jobAsserter[jobId];
+    }
+
+    function totalLockedBond() external view returns (uint256) {
+        return _getEvaluatorStorage().totalLockedBond;
+    }
+
     // ============================================================
     //  IACPHook Implementation
     // ============================================================
@@ -339,7 +351,8 @@ contract APEXEvaluatorUpgradeable is
                 $.jobDataUrl[jobId] = _sanitizeDataUrl(string(optParams));
             }
 
-            _initiateAssertionInternal(jobId);
+            // Assertion is NOT auto-initiated here (v5).
+            // Provider must call initiateAssertion() separately and pay the bond.
         }
     }
 
@@ -357,30 +370,28 @@ contract APEXEvaluatorUpgradeable is
     //  Bond Management
     // ============================================================
 
-    function depositBond(uint256 amount) external {
-        require(amount > 0, "amount must be > 0");
-        EvaluatorStorage storage $ = _getEvaluatorStorage();
-        $.bondToken.safeTransferFrom(msg.sender, address(this), amount);
-        $.bondBalance += amount;
-        emit BondDeposited(msg.sender, amount);
+    function depositBond(uint256) external pure {
+        revert("deprecated: agent pays bond directly via initiateAssertion");
     }
 
-    function withdrawBond(uint256 amount) external onlyOwner {
-        EvaluatorStorage storage $ = _getEvaluatorStorage();
-        require($.bondBalance >= amount, "insufficient balance");
-        $.bondBalance -= amount;
-        $.bondToken.safeTransfer(msg.sender, amount);
-        emit BondWithdrawn(msg.sender, amount);
+    function withdrawBond(uint256) external pure {
+        revert("deprecated: agent pays bond directly via initiateAssertion");
     }
 
     // ============================================================
     //  Assertion Functions
     // ============================================================
 
+    /**
+     * @notice Initiate a UMA assertion for a submitted job.
+     * @dev Caller must be the job provider. Caller must approve bondToken to this
+     *      contract for at least getMinimumBond() before calling.
+     * @param jobId The job ID in AgenticCommerce
+     */
     function initiateAssertion(uint256 jobId) external nonReentrant whenNotPaused {
         EvaluatorStorage storage $ = _getEvaluatorStorage();
         IAgenticCommerce.Job memory job = $.erc8183.getJob(jobId);
-        if (msg.sender != owner() && msg.sender != job.provider && msg.sender != job.client) {
+        if (msg.sender != job.provider) {
             revert CallerNotAllowed(msg.sender);
         }
         _initiateAssertionInternal(jobId);
@@ -413,18 +424,30 @@ contract APEXEvaluatorUpgradeable is
 
         // Bond accounting: use cached bond amount to avoid desync (M04)
         uint256 cachedBond = $.jobBondAmount[jobId];
+        address asserter = $.jobAsserter[jobId];
+
+        // Decrement locked bond tracker
+        if ($.totalLockedBond >= cachedBond) {
+            $.totalLockedBond -= cachedBond;
+        }
 
         if (!$.jobDisputed[jobId]) {
             // Bond returned by OOv3 on successful resolution (no dispute)
-            $.bondBalance += cachedBond;
-            emit BondReturned(assertionId, cachedBond);
+            // Forward back to the agent who paid it
+            if (asserter != address(0) && cachedBond > 0) {
+                $.bondToken.safeTransfer(asserter, cachedBond);
+                emit BondTransferredToAsserter(jobId, asserter, cachedBond);
+            }
         } else if (assertedTruthfully) {
-            // Dispute resolved in asserter's favor — UMA returns 2*bond - oracleFee (M03)
-            uint256 actualBalance = $.bondToken.balanceOf(address(this));
-            if (actualBalance > $.bondBalance) {
-                uint256 received = actualBalance - $.bondBalance;
-                $.bondBalance += received;
-                emit BondReturned(assertionId, received);
+            // Dispute resolved in asserter's favor — OOv3 returns 2*bond - oracleFee (M03)
+            // Forward any received tokens (beyond remaining locked) to the asserter
+            if (asserter != address(0)) {
+                uint256 actualBalance = $.bondToken.balanceOf(address(this));
+                if (actualBalance > $.totalLockedBond) {
+                    uint256 received = actualBalance - $.totalLockedBond;
+                    $.bondToken.safeTransfer(asserter, received);
+                    emit BondTransferredToAsserter(jobId, asserter, received);
+                }
             }
         }
         // If disputed and assertedTruthfully == false, bond is lost to disputer
@@ -562,9 +585,9 @@ contract APEXEvaluatorUpgradeable is
         EvaluatorStorage storage $ = _getEvaluatorStorage();
 
         if (token == address($.bondToken)) {
-            // Only allow rescuing excess tokens beyond tracked bondBalance
+            // Only allow rescuing excess tokens beyond locked bond amounts
             uint256 actualBalance = $.bondToken.balanceOf(address(this));
-            uint256 excess = actualBalance > $.bondBalance ? actualBalance - $.bondBalance : 0;
+            uint256 excess = actualBalance > $.totalLockedBond ? actualBalance - $.totalLockedBond : 0;
             require(amount <= excess, "cannot rescue reserved bond");
         }
 
@@ -606,22 +629,17 @@ contract APEXEvaluatorUpgradeable is
     function setBondToken(address newBondToken) external onlyOwner {
         require(newBondToken != address(0), "invalid bond token");
         EvaluatorStorage storage $ = _getEvaluatorStorage();
-        require($.bondBalance == 0, "withdraw bond first");
+        require($.totalLockedBond == 0, "cannot change bond token with active assertions");
         address oldToken = address($.bondToken);
         $.bondToken = IERC20(newBondToken);
         emit BondTokenUpdated(oldToken, newBondToken);
     }
 
     /**
-     * @notice Sync bondBalance with actual token balance
-     * @dev Use when bondBalance gets out of sync (e.g., direct transfers)
+     * @notice Deprecated in v5. Bond pool is no longer used.
      */
-    function syncBondBalance() external onlyOwner {
-        EvaluatorStorage storage $ = _getEvaluatorStorage();
-        uint256 oldBalance = $.bondBalance;
-        uint256 actualBalance = $.bondToken.balanceOf(address(this));
-        $.bondBalance = actualBalance;
-        emit BondBalanceSynced(oldBalance, actualBalance);
+    function syncBondBalance() external pure {
+        revert("deprecated: bond pool removed in v5");
     }
 
     // ============================================================
@@ -632,10 +650,8 @@ contract APEXEvaluatorUpgradeable is
         EvaluatorStorage storage $ = _getEvaluatorStorage();
         IAgenticCommerce.Job memory job = $.erc8183.getJob(jobId);
 
-        if (msg.sender != address($.erc8183)) {
-            if (job.status != IAgenticCommerce.JobStatus.Submitted) {
-                revert JobNotSubmitted(jobId);
-            }
+        if (job.status != IAgenticCommerce.JobStatus.Submitted) {
+            revert JobNotSubmitted(jobId);
         }
         if (job.evaluator != address(this)) {
             revert NotEvaluatorForJob(jobId);
@@ -646,10 +662,10 @@ contract APEXEvaluatorUpgradeable is
 
         uint256 bond = $.oov3.getMinimumBond(address($.bondToken));
 
-        if ($.bondBalance < bond) {
-            revert InsufficientBondBalance(bond, $.bondBalance);
-        }
-        $.bondBalance -= bond;
+        // Pull bond from the caller (provider) — caller must have pre-approved
+        $.bondToken.safeTransferFrom(msg.sender, address(this), bond);
+        $.jobAsserter[jobId] = msg.sender;
+        $.totalLockedBond += bond;
 
         $.bondToken.forceApprove(address($.oov3), bond);
 

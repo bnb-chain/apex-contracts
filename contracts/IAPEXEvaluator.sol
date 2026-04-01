@@ -26,36 +26,21 @@ interface IAPEXEvaluator {
         uint256 indexed jobId,
         bytes32 indexed assertionId
     );
-    event BondDeposited(address indexed depositor, uint256 amount);
-    event BondWithdrawn(address indexed recipient, uint256 amount);
-
-    // ============================================================
-    //  Bond Management
-    // ============================================================
-
-    /**
-     * @notice Deposit bond tokens into the contract
-     * @param amount Amount of bond tokens to deposit
-     */
-    function depositBond(uint256 amount) external;
-
-    /**
-     * @notice Withdraw bond tokens from the contract (owner only)
-     * @param amount Amount to withdraw
-     */
-    function withdrawBond(uint256 amount) external;
-
-    /**
-     * @notice Get current bond balance
-     */
-    function bondBalance() external view returns (uint256);
+    /// @notice Emitted when bond is forwarded back to the asserter after resolution
+    event BondTransferredToAsserter(
+        uint256 indexed jobId,
+        address indexed asserter,
+        uint256 amount
+    );
 
     // ============================================================
     //  Assertion Functions
     // ============================================================
 
     /**
-     * @notice Manually initiate an assertion for a submitted job
+     * @notice Initiate a UMA assertion for a submitted job.
+     * @dev Caller must be the job provider. Caller must approve bondToken
+     *      to this contract for at least getMinimumBond() before calling.
      * @param jobId The job ID in AgenticCommerce
      */
     function initiateAssertion(uint256 jobId) external;
@@ -134,6 +119,12 @@ interface IAPEXEvaluator {
      */
     function jobDataUrl(uint256 jobId) external view returns (string memory);
 
+    /**
+     * @notice Get the address that paid the bond for a job's assertion
+     * @param jobId The job ID
+     */
+    function jobAsserter(uint256 jobId) external view returns (address);
+
     // ============================================================
     //  Config
     // ============================================================
@@ -147,4 +138,9 @@ interface IAPEXEvaluator {
      * @notice Get the number of pending (unresolved) assertions
      */
     function pendingAssertions() external view returns (uint256);
+
+    /**
+     * @notice Get the total amount of bond tokens locked in active assertions
+     */
+    function totalLockedBond() external view returns (uint256);
 }

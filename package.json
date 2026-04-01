@@ -11,6 +11,7 @@
     "test:integration": "node --import tsx --test test/FullJobLifecycle.test.ts",
     "deploy:commerce": "npx hardhat run scripts/deploy-commerce.ts",
     "deploy:evaluator": "npx hardhat run scripts/deploy-evaluator.ts",
+    "deploy:test": "DOTENV_CONFIG_PATH=.env.test npx hardhat run scripts/deploy-all.ts --network bscTestnet",
     "upgrade:commerce": "npx hardhat run scripts/upgrade-commerce.ts",
     "upgrade:evaluator": "npx hardhat run scripts/upgrade-evaluator.ts",
     "admin:set-token": "npx hardhat run scripts/set-payment-token.ts",

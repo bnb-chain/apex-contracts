@@ -12,12 +12,18 @@
 APEX defines a job lifecycle between two AI agents — a **Client** (who pays) and a **Provider** (who delivers). An **Evaluator** (human or contract) attests to the work quality before funds are released.
 
 ```
-Client                    Provider                 Evaluator
+Client                    Provider                 Evaluator (APEXEvaluator)
   │                          │                        │
   ├── createJob() ──────────►│                        │
   ├── setBudget() + fund() ──►                        │
-  │                          ├── submit() ───────────►│
-  │                          │                        ├── complete() ──► Provider paid
+  │                          ├── submit() ───────────►│  (stores deliverable)
+  │                          ├── approve bond token ──►
+  │                          ├── initiateAssertion() ─►  (UMA OOv3 liveness starts)
+  │                          │                        │
+  │                  (liveness period, ~2h)           │
+  │                          │                        │
+  │                          │  [anyone] settleJob() ─►  (OOv3 callback)
+  │                          │                        ├── complete() ──► Provider paid + bond returned
   │                          │                        └── reject()  ──► Client refunded
   │                          │
   └── claimRefund() ─────────────── (if expired) ────► Client refunded
@@ -36,7 +42,7 @@ Open ──► Funded ──► Submitted ──┬── Completed (provider pa
 | Contract | Purpose |
 |---|---|
 | [`AgenticCommerceUpgradeable`](contracts/AgenticCommerceUpgradeable.sol) | Core escrow — job creation, funding, submission, payout, and refund |
-| [`APEXEvaluatorUpgradeable`](contracts/APEXEvaluatorUpgradeable.sol) | UMA OOv3-based evaluator — auto-asserts on submission, settles after liveness period |
+| [`APEXEvaluatorUpgradeable`](contracts/APEXEvaluatorUpgradeable.sol) | UMA OOv3-based evaluator — provider calls `initiateAssertion()` after submit, settles after liveness period |
 | [`IACPHook`](contracts/IACPHook.sol) | Hook interface — `beforeAction` / `afterAction` callbacks per job action |
 | [`BaseACPHook`](contracts/BaseACPHook.sol) | Convenience base for building custom hooks |
 | [`IAPEXEvaluator`](contracts/IAPEXEvaluator.sol) | Evaluator interface |
@@ -162,7 +168,7 @@ Both core contracts use the [UUPS proxy pattern](https://docs.openzeppelin.com/c
 
 Each job can optionally specify a hook contract implementing `IACPHook`. The hook receives `beforeAction` and `afterAction` callbacks for `setProvider`, `setBudget`, `fund`, `submit`, `complete`, and `reject`. The `claimRefund` action is deliberately **not** hookable as a safety mechanism.
 
-The `APEXEvaluatorUpgradeable` contract itself implements `IACPHook` — when set as a job's hook, it auto-asserts job completion upon submission, enabling fully automated evaluation via UMA's optimistic oracle.
+The `APEXEvaluatorUpgradeable` contract itself implements `IACPHook` — when set as a job's hook, it stores the deliverable hash on submission. After submitting, the provider must separately call `initiateAssertion(jobId)` (approving the bond token to the evaluator first) to start the UMA OOv3 liveness period. The bond is returned to the provider on clean resolution, or redistributed on a won dispute.
 
 ### Fee Mechanism
 
