@@ -91,15 +91,15 @@ contract AgenticCommerceUpgradeable is
         _disableInitializers();
     }
 
-    function initialize(address paymentToken_, address treasury_) public initializer {
-        if (paymentToken_ == address(0) || treasury_ == address(0))
+    function initialize(address paymentToken_, address treasury_, address admin_) public initializer {
+        if (paymentToken_ == address(0) || treasury_ == address(0) || admin_ == address(0))
             revert ZeroAddress();
         __AccessControl_init();
         __Pausable_init();
         paymentToken = IERC20(paymentToken_);
         platformTreasury = treasury_;
-        _grantRole(DEFAULT_ADMIN_ROLE, _msgSender());
-        _grantRole(ADMIN_ROLE, _msgSender());
+        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
+        _grantRole(ADMIN_ROLE, admin_);
         whitelistedHooks[address(0)] = true;
     }
 
@@ -213,6 +213,7 @@ contract AgenticCommerceUpgradeable is
             hook: hook
         });
         emit JobCreated(jobId, _msgSender(), provider, evaluator, expiredAt, hook);
+        _afterHook(hook, jobId, this.createJob.selector, abi.encode(_msgSender(), provider, evaluator));
         return jobId;
     }
 

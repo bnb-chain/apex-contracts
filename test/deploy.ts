@@ -12,14 +12,15 @@ export async function mintTokens(token: any, to: `0x${string}`, amount: bigint) 
 export async function deployAPEXProxy(
   viem: any,
   tokenAddress: `0x${string}`,
-  treasuryAddress: `0x${string}`
+  treasuryAddress: `0x${string}`,
+  adminAddress: `0x${string}`
 ) {
   const impl = await viem.deployContract("AgenticCommerceUpgradeable", [TRUSTED_FORWARDER]);
 
   const initData = encodeFunctionData({
     abi: impl.abi,
     functionName: "initialize",
-    args: [tokenAddress, treasuryAddress],
+    args: [tokenAddress, treasuryAddress, adminAddress],
   });
 
   const proxy = await viem.deployContract("ERC1967Proxy", [impl.address, initData]);

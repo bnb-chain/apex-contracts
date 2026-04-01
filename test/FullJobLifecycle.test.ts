@@ -24,7 +24,7 @@ describe("Full Job Lifecycle (Integration)", async function () {
 
   async function deployFullStack() {
     const token = await deployMockToken(viem);
-    const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+    const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
     const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
     const evaluator = await deployEvaluatorProxy(
       viem, deployerAddress, apex.address, oov3.address, token.address, DEFAULT_LIVENESS
@@ -36,16 +36,8 @@ describe("Full Job Lifecycle (Integration)", async function () {
     });
     await apexAsDeployer.write.setHookWhitelist([evaluator.address as `0x${string}`, true]);
 
-    // Fund evaluator bond
-    await token.write.mint([deployerAddress, DEFAULT_BOND * BigInt(10)]);
-    const tokenAsDeployer = await viem.getContractAt("MockERC20", token.address, {
-      client: { wallet: deployer },
-    });
-    await tokenAsDeployer.write.approve([evaluator.address, DEFAULT_BOND * BigInt(10)]);
-    const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-      client: { wallet: deployer },
-    });
-    await evalAsDeployer.write.depositBond([DEFAULT_BOND * BigInt(5)]);
+    // Mint bond tokens to provider — they pay the bond when initiating assertions
+    await token.write.mint([providerAddress, DEFAULT_BOND * BigInt(10)]);
 
     return { token, apex, oov3, evaluator };
   }
@@ -91,7 +83,7 @@ describe("Full Job Lifecycle (Integration)", async function () {
       job = await apex.read.getJob([BigInt(1)]);
       assert.equal(job.status, JobStatus.Funded);
 
-      // 4. Submit (provider) — triggers auto-assertion via hook
+      // 4. Submit (provider) — hook stores deliverable but does NOT auto-initiate assertion
       const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: provider },
       });
@@ -100,7 +92,22 @@ describe("Full Job Lifecycle (Integration)", async function () {
       job = await apex.read.getJob([BigInt(1)]);
       assert.equal(job.status, JobStatus.Submitted);
 
-      // Verify assertion was auto-initiated
+      // Verify assertion was NOT auto-initiated
+      const initiatedBeforeManual = await evaluator.read.jobAssertionInitiated([BigInt(1)]);
+      assert.equal(initiatedBeforeManual, false);
+
+      // 4b. Provider approves bond token and initiates assertion manually
+      const tokenAsProvider = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: provider },
+      });
+      await tokenAsProvider.write.approve([evaluator.address as `0x${string}`, DEFAULT_BOND]);
+
+      const evalAsProvider = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: provider },
+      });
+      await evalAsProvider.write.initiateAssertion([BigInt(1)]);
+
+      // Verify assertion is now initiated
       const initiated = await evaluator.read.jobAssertionInitiated([BigInt(1)]);
       assert.equal(initiated, true);
 
@@ -118,6 +125,10 @@ describe("Full Job Lifecycle (Integration)", async function () {
       const pending = await evaluator.read.pendingAssertions();
       assert.equal(pending, BigInt(0));
 
+      // 8. Verify bond returned to provider (totalLockedBond back to 0)
+      const totalLocked = await evaluator.read.totalLockedBond();
+      assert.equal(totalLocked, BigInt(0));
+
       // The settlement callback calls apex.complete() via try-catch.
       // In test environments with mock OOv3, the complete may be silently caught
       // due to reentrancy guard interactions. Verify the assertion was resolved
@@ -125,8 +136,9 @@ describe("Full Job Lifecycle (Integration)", async function () {
       job = await apex.read.getJob([BigInt(1)]);
       if (job.status === JobStatus.Completed) {
         // Full happy path worked end-to-end
+        // Provider: started with 10 bond tokens, paid 1 bond, got 1 back + budget payment
         const providerBalance = await token.read.balanceOf([providerAddress]);
-        assert.equal(providerBalance, budget);
+        assert.equal(providerBalance, DEFAULT_BOND * BigInt(10) + budget);
         // Contract no longer exposes totalEscrowed; verify escrow via token balance
         const contractBalance = await token.read.balanceOf([apex.address]);
         assert.equal(contractBalance, BigInt(0));
@@ -137,6 +149,9 @@ describe("Full Job Lifecycle (Integration)", async function () {
         assert.equal(job.status, JobStatus.Submitted);
         const assertionId = await evaluator.read.jobToAssertion([BigInt(1)]);
         assert.notEqual(assertionId, "0x0000000000000000000000000000000000000000000000000000000000000000");
+        // Bond returned to provider: paid 1, got 1 back → net 10 bond tokens
+        const providerBalance = await token.read.balanceOf([providerAddress]);
+        assert.equal(providerBalance, DEFAULT_BOND * BigInt(10));
       }
     });
   });
@@ -181,7 +196,7 @@ describe("Full Job Lifecycle (Integration)", async function () {
       const [, , , , humanEvaluator] = await viem.getWalletClients();
 
       // Create new job with human evaluator
-      const apex2 = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex2 = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
       const apexAsClient2 = await viem.getContractAt("AgenticCommerceUpgradeable", apex2.address, {
         client: { wallet: client },
       });
@@ -331,8 +346,9 @@ describe("Full Job Lifecycle (Integration)", async function () {
       assert.equal(job2.status, JobStatus.Rejected);
 
       // Provider got paid for job 1
+      // Note: deployFullStack() mints DEFAULT_BOND * 10 to provider for potential assertions
       const providerBal = await token.read.balanceOf([providerAddress]);
-      assert.equal(providerBal, budget);
+      assert.equal(providerBal, DEFAULT_BOND * BigInt(10) + budget);
 
       // Client got refunded for job 2
       const clientBal = await token.read.balanceOf([clientAddress]);

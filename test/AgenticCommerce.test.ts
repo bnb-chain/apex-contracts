@@ -31,7 +31,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("Deployment", async () => {
     it("should initialize with correct parameters", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const paymentToken = await apex.read.paymentToken();
       const platformTreasury = await apex.read.platformTreasury();
@@ -44,7 +44,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should grant ADMIN_ROLE and DEFAULT_ADMIN_ROLE to deployer", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const ADMIN_ROLE = await apex.read.ADMIN_ROLE();
       const DEFAULT_ADMIN_ROLE = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`;
@@ -58,10 +58,10 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should not allow re-initialization", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await assert.rejects(
-        apex.write.initialize([token.address, treasuryAddress]),
+        apex.write.initialize([token.address, treasuryAddress, deployerAddress]),
         /InvalidInitialization/
       );
     });
@@ -74,7 +74,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("createJob", async () => {
     it("should create a job with provider and evaluator", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const description = "Test job description";
@@ -102,7 +102,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should create a job without provider (set later)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -124,7 +124,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert with zero evaluator (ZeroAddress)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -145,7 +145,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert when expiry is too short (ExpiryTooShort)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       // Less than 5 minutes in the future
       const expiredAt = await futureTimestamp(60);
@@ -167,7 +167,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should increment jobCounter for each new job", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -194,7 +194,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("setProvider", async () => {
     it("should allow client to set provider", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -210,7 +210,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert if not client (Unauthorized)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -231,7 +231,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert if provider already set (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -249,7 +249,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert with zero provider address (ZeroAddress)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -272,7 +272,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("setBudget", async () => {
     it("should allow client to set budget", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -290,7 +290,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should allow provider to set budget", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -312,7 +312,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert if unauthorized (Unauthorized)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -333,7 +333,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert when job is not Open (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const jobId = await createAndFundJob(
         viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET
@@ -358,7 +358,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("fund", async () => {
     it("should fund job when expectedBudget matches", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -381,7 +381,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should transfer tokens to contract on fund", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -406,7 +406,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert on budget mismatch (BudgetMismatch)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -430,7 +430,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert when budget is zero (ZeroBudget)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -448,7 +448,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert when no provider set (ProviderNotSet)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -478,7 +478,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("submit", async () => {
     it("should allow provider to submit a funded job", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -495,7 +495,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert if not Funded (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -517,7 +517,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert if not provider (Unauthorized)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -540,7 +540,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("complete", async () => {
     it("should allow evaluator to complete a submitted job", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -560,7 +560,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should pay full budget to provider when no fees set", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -582,7 +582,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert if not evaluator (Unauthorized)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -603,7 +603,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert if not Submitted (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -626,7 +626,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("reject", async () => {
     it("should allow client to reject an Open job", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -642,7 +642,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should allow evaluator to reject a Funded job with refund", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -662,7 +662,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should allow evaluator to reject a Submitted job with refund", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -687,7 +687,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert if unauthorized (Unauthorized)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -714,7 +714,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("claimRefund", async () => {
     it("should refund client after expiry", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -739,7 +739,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert before expiry (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       // Use a far-future expiry so the job is definitely not expired yet
       const expiredAt = await futureTimestamp(86400 * 365);
@@ -766,7 +766,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should revert for non-Funded/Submitted job (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -790,7 +790,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("Fees", async () => {
     it("setPlatformFee sets fee and treasury, only ADMIN_ROLE", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -806,7 +806,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("setEvaluatorFee sets fee, only ADMIN_ROLE", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -820,7 +820,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("complete() with platformFee=250bp: treasury gets 2.5%, provider gets 97.5%", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -854,7 +854,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("complete() with platformFee=250bp + evaluatorFee=500bp: treasury gets 2.5%, evaluator gets 5%, provider gets 92.5%", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -893,7 +893,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("total fees > 10000bp reverts with FeesTooHigh", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -908,7 +908,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("non-admin cannot call setPlatformFee (AccessControlUnauthorizedAccount)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: other },
@@ -928,7 +928,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("Pause", async () => {
     it("pause() by admin pauses the contract", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -941,7 +941,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("createJob reverts when paused (EnforcedPause)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -961,7 +961,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("fund reverts when paused", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -990,7 +990,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("claimRefund works when paused (critical safety test)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       // Set up a funded job with a near-future expiry BEFORE pausing
       const expiredAt = await futureTimestamp(3600);
@@ -1026,7 +1026,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("unpause() resumes operations", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -1050,7 +1050,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("non-admin cannot pause (AccessControlUnauthorizedAccount)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: other },
@@ -1070,7 +1070,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("HookWhitelist", async () => {
     it("setHookWhitelist adds hook, emits HookWhitelistUpdated", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
@@ -1090,7 +1090,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("address(0) is whitelisted by default (createJob with zeroAddress hook succeeds)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const isWhitelisted = await apex.read.whitelistedHooks([zeroAddress]);
       assert.equal(isWhitelisted, true);
@@ -1108,7 +1108,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("non-whitelisted hook reverts createJob with HookNotWhitelisted", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -1126,7 +1126,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("non-admin cannot call setHookWhitelist (AccessControlUnauthorizedAccount)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: other },
@@ -1146,7 +1146,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("ReputationSignal", async () => {
     it("complete() emits ReputationSignal(jobId, provider, 'provider', 1)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -1178,7 +1178,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("reject() from Funded emits ReputationSignal(jobId, provider, 'provider', -1)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
@@ -1205,7 +1205,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("claimRefund() emits ReputationSignal(jobId, provider, 'provider', 0)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const jobId = await createAndFundJob(
@@ -1239,7 +1239,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("reject() from Open does NOT emit ReputationSignal", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -1270,7 +1270,7 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("Full lifecycle", async () => {
     it("should complete Open -> Funded -> Submitted -> Completed lifecycle", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const expiredAt = await futureTimestamp(86400);
       const budget = DEFAULT_BUDGET;

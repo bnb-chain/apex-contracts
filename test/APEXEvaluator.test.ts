@@ -24,11 +24,12 @@ describe("APEXEvaluatorUpgradeable", async function () {
   const otherAddress = getAddress(other.account.address);
 
   /**
-   * Deploy full test stack: token, apex, mockOOv3, evaluator
+   * Deploy full test stack: token, apex, mockOOv3, evaluator.
+   * Bond tokens are minted to provider (not deposited into evaluator pool).
    */
   async function deployStack() {
     const token = await deployMockToken(viem);
-    const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+    const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
     const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
 
     const evaluator = await deployEvaluatorProxy(
@@ -46,17 +47,8 @@ describe("APEXEvaluatorUpgradeable", async function () {
     });
     await apexAsDeployer.write.setHookWhitelist([evaluator.address as `0x${string}`, true]);
 
-    // Fund evaluator with bond tokens
-    await token.write.mint([deployerAddress, DEFAULT_BOND * BigInt(10)]);
-    const tokenAsDeployer = await viem.getContractAt("MockERC20", token.address, {
-      client: { wallet: deployer },
-    });
-    await tokenAsDeployer.write.approve([evaluator.address, DEFAULT_BOND * BigInt(10)]);
-
-    const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-      client: { wallet: deployer },
-    });
-    await evalAsDeployer.write.depositBond([DEFAULT_BOND * BigInt(5)]);
+    // Mint bond tokens to provider so they can pay the bond themselves
+    await token.write.mint([providerAddress, DEFAULT_BOND * BigInt(10)]);
 
     return { token, apex, oov3, evaluator };
   }
@@ -79,7 +71,7 @@ describe("APEXEvaluatorUpgradeable", async function () {
       assert.equal(getAddress(oov3Addr as string), getAddress(oov3.address));
       assert.equal(getAddress(bondToken as string), getAddress(token.address));
       assert.equal(liveness, DEFAULT_LIVENESS);
-      assert.equal(version, BigInt(3));
+      assert.equal(version, BigInt(5));
     });
 
     it("should not allow re-initialization", async () => {
@@ -94,31 +86,11 @@ describe("APEXEvaluatorUpgradeable", async function () {
   });
 
   // ============================================================
-  // Bond Management Tests
+  // Bond Management Tests (deprecated pool)
   // ============================================================
 
-  describe("Bond Management", async () => {
-    it("should accept bond deposits", async () => {
-      const { evaluator } = await deployStack();
-      const balance = await evaluator.read.bondBalance();
-      assert.equal(balance, DEFAULT_BOND * BigInt(5));
-    });
-
-    it("should allow owner to withdraw bond", async () => {
-      const { evaluator, token } = await deployStack();
-
-      const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-        client: { wallet: deployer },
-      });
-
-      const amount = DEFAULT_BOND;
-      await evalAsDeployer.write.withdrawBond([amount]);
-
-      const balance = await evaluator.read.bondBalance();
-      assert.equal(balance, DEFAULT_BOND * BigInt(4));
-    });
-
-    it("should revert withdraw if insufficient balance", async () => {
+  describe("Bond Management (Deprecated)", async () => {
+    it("should revert depositBond as deprecated", async () => {
       const { evaluator } = await deployStack();
 
       const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
@@ -126,36 +98,28 @@ describe("APEXEvaluatorUpgradeable", async function () {
       });
 
       await assert.rejects(
-        evalAsDeployer.write.withdrawBond([DEFAULT_BOND * BigInt(100)]),
-        /insufficient balance/
+        evalAsDeployer.write.depositBond([DEFAULT_BOND]),
+        /deprecated/i
       );
     });
 
-    it("should revert withdraw from non-owner", async () => {
-      const { evaluator } = await deployStack();
-
-      const evalAsOther = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-        client: { wallet: other },
-      });
-
-      await assert.rejects(
-        evalAsOther.write.withdrawBond([BigInt(1)]),
-        /OwnableUnauthorizedAccount/
-      );
-    });
-
-    it("should revert deposit of zero amount", async () => {
+    it("should revert withdrawBond as deprecated", async () => {
       const { evaluator } = await deployStack();
 
       const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
         client: { wallet: deployer },
       });
 
-      // "amount must be > 0" require revert (may appear as inferred reason or generic revert in viem)
       await assert.rejects(
-        evalAsDeployer.write.depositBond([BigInt(0)]),
-        /amount must be > 0|couldn't infer the reason|reverted/i
+        evalAsDeployer.write.withdrawBond([DEFAULT_BOND]),
+        /deprecated/i
       );
+    });
+
+    it("totalLockedBond should start at zero", async () => {
+      const { evaluator } = await deployStack();
+      const locked = await evaluator.read.totalLockedBond();
+      assert.equal(locked, BigInt(0));
     });
   });
 
@@ -189,14 +153,8 @@ describe("APEXEvaluatorUpgradeable", async function () {
         /OnlyERC8183/
       );
     });
-  });
 
-  // ============================================================
-  // Assertion Lifecycle Tests
-  // ============================================================
-
-  describe("Assertion Lifecycle", async () => {
-    it("should initiate assertion for submitted job", async () => {
+    it("should NOT auto-initiate assertion on submit", async () => {
       const { token, apex, oov3, evaluator } = await deployStack();
 
       const jobId = await createAndFundJob(
@@ -205,24 +163,98 @@ describe("APEXEvaluatorUpgradeable", async function () {
         evaluator.address as `0x${string}` // hook = evaluator
       );
 
-      // Submit triggers auto-assertion via hook
+      // Submit — hook fires but should NOT auto-initiate assertion
       const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: provider },
       });
       await apexAsProvider.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]);
+
+      // Assertion must NOT be initiated
+      const initiated = await evaluator.read.jobAssertionInitiated([jobId]);
+      assert.equal(initiated, false);
+
+      const pending = await evaluator.read.pendingAssertions();
+      assert.equal(pending, BigInt(0));
+    });
+  });
+
+  // ============================================================
+  // Assertion Lifecycle Tests
+  // ============================================================
+
+  describe("Assertion Lifecycle", async () => {
+    it("should initiate assertion when provider approves and calls initiateAssertion", async () => {
+      const { token, apex, oov3, evaluator } = await deployStack();
+
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress,
+        evaluator.address as `0x${string}`, DEFAULT_BUDGET,
+        evaluator.address as `0x${string}` // hook = evaluator
+      );
+
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]);
+
+      // Assertion not yet initiated
+      assert.equal(await evaluator.read.jobAssertionInitiated([jobId]), false);
+
+      // Provider approves bond token to evaluator
+      const tokenAsProvider = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: provider },
+      });
+      await tokenAsProvider.write.approve([evaluator.address, DEFAULT_BOND]);
+
+      // Provider initiates assertion
+      const evalAsProvider = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: provider },
+      });
+      await evalAsProvider.write.initiateAssertion([jobId]);
 
       const initiated = await evaluator.read.jobAssertionInitiated([jobId]);
       assert.equal(initiated, true);
 
       const pending = await evaluator.read.pendingAssertions();
       assert.equal(pending, BigInt(1));
+
+      // Asserter recorded correctly
+      const asserter = await evaluator.read.jobAsserter([jobId]);
+      assert.equal(getAddress(asserter as string), providerAddress);
+
+      // totalLockedBond incremented
+      const locked = await evaluator.read.totalLockedBond();
+      assert.equal(locked, DEFAULT_BOND);
     });
 
-    it("should settle job after liveness period", async () => {
+    it("should revert initiateAssertion from non-provider", async () => {
       const { token, apex, oov3, evaluator } = await deployStack();
 
-      // Use evaluator as evaluator but NOT as hook, to avoid reentrancy
-      // through the hook during settlement callback
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress,
+        evaluator.address as `0x${string}`, DEFAULT_BUDGET,
+        zeroAddress
+      );
+
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]);
+
+      // Other user attempts to initiate — should fail
+      const evalAsOther = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: other },
+      });
+
+      await assert.rejects(
+        evalAsOther.write.initiateAssertion([jobId]),
+        /CallerNotAllowed/
+      );
+    });
+
+    it("should settle job and return bond to provider", async () => {
+      const { token, apex, oov3, evaluator } = await deployStack();
+
       const budget = DEFAULT_BUDGET;
       const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 7200);
 
@@ -245,49 +277,47 @@ describe("APEXEvaluatorUpgradeable", async function () {
       await tokenAsClient.write.approve([apex.address, budget]);
       await apexAsClient.write.fund([BigInt(1), budget, "0x"]);
 
-      // Manually initiate assertion (no hook auto-trigger)
       const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: provider },
       });
       await apexAsProvider.write.submit([BigInt(1), keccak256(toHex("deliverable")), "0x"]);
 
-      const evalAsOther = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-        client: { wallet: other },
+      // Provider approves bond and initiates assertion
+      const tokenAsProvider = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: provider },
       });
-      await evalAsOther.write.initiateAssertion([BigInt(1)]);
+      await tokenAsProvider.write.approve([evaluator.address, DEFAULT_BOND]);
+
+      const providerBalBefore = await token.read.balanceOf([providerAddress]);
+
+      const evalAsProvider = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: provider },
+      });
+      await evalAsProvider.write.initiateAssertion([BigInt(1)]);
+
+      // Bond deducted from provider
+      const providerBalAfterInitiate = await token.read.balanceOf([providerAddress]);
+      assert.equal(providerBalAfterInitiate, providerBalBefore - DEFAULT_BOND);
 
       // Fast forward past liveness
       await testClient.increaseTime({ seconds: Number(DEFAULT_LIVENESS) + 1 });
       await testClient.mine({ blocks: 1 });
 
-      // Settle — the mock OOv3 calls assertionResolvedCallback which
-      // tries apex.complete() via try-catch. If it silently fails,
-      // the job stays Submitted but pendingAssertions still decrements.
+      const evalAsOther = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: other },
+      });
       await evalAsOther.write.settleJob([BigInt(1)]);
 
       const pending = await evaluator.read.pendingAssertions();
       assert.equal(pending, BigInt(0));
 
-      // The callback's try-catch may silently fail due to reentrancy
-      // between mock OOv3 → evaluator → APEX. Verify the assertion was resolved.
-      const assertionId = await evaluator.read.jobToAssertion([BigInt(1)]);
-      assert.notEqual(assertionId, "0x0000000000000000000000000000000000000000000000000000000000000000");
+      // Bond should be returned to provider
+      const providerBalAfterSettle = await token.read.balanceOf([providerAddress]);
+      assert.equal(providerBalAfterSettle, providerBalBefore);
 
-      // If job was completed via callback, check status. If not, manually complete.
-      const job = await apex.read.getJob([BigInt(1)]);
-      if (job.status === JobStatus.Submitted) {
-        // Settlement callback's try-catch swallowed the complete() revert.
-        // This can happen due to reentrancy guard interactions in test env.
-        // Manually complete to verify the evaluator can still complete.
-        const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-          client: { wallet: deployer },
-        });
-        // The evaluator contract needs to be msg.sender for complete
-        // Since we can't call from the contract, verify the assertion resolved
-        assert.equal(pending, BigInt(0), "pending assertions should be 0 after settle");
-      } else {
-        assert.equal(job.status, JobStatus.Completed);
-      }
+      // totalLockedBond should be zero
+      const locked = await evaluator.read.totalLockedBond();
+      assert.equal(locked, BigInt(0));
     });
 
     it("should revert settleJob if no assertion exists", async () => {
@@ -309,7 +339,7 @@ describe("APEXEvaluatorUpgradeable", async function () {
       const jobId = await createAndFundJob(
         viem, apex, token, client, providerAddress,
         evaluator.address as `0x${string}`, DEFAULT_BUDGET,
-        evaluator.address as `0x${string}`
+        zeroAddress
       );
 
       const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -317,14 +347,45 @@ describe("APEXEvaluatorUpgradeable", async function () {
       });
       await apexAsProvider.write.submit([jobId, keccak256(toHex("d")), "0x"]);
 
-      // Try manual initiate again
-      const evalAsOther = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-        client: { wallet: other },
+      // First initiation
+      const tokenAsProvider = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: provider },
       });
+      await tokenAsProvider.write.approve([evaluator.address, DEFAULT_BOND * BigInt(2)]);
 
+      const evalAsProvider = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: provider },
+      });
+      await evalAsProvider.write.initiateAssertion([jobId]);
+
+      // Try again — should fail
       await assert.rejects(
-        evalAsOther.write.initiateAssertion([jobId]),
+        evalAsProvider.write.initiateAssertion([jobId]),
         /AssertionAlreadyInitiated/
+      );
+    });
+
+    it("should revert initiateAssertion if provider has insufficient bond allowance", async () => {
+      const { token, apex, oov3, evaluator } = await deployStack();
+
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress,
+        evaluator.address as `0x${string}`, DEFAULT_BUDGET,
+        zeroAddress
+      );
+
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([jobId, keccak256(toHex("d")), "0x"]);
+
+      // No approval — should revert
+      const evalAsProvider = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: provider },
+      });
+      await assert.rejects(
+        evalAsProvider.write.initiateAssertion([jobId]),
+        /reverted|ERC20InsufficientAllowance|insufficient allowance/i
       );
     });
   });
@@ -392,7 +453,7 @@ describe("APEXEvaluatorUpgradeable", async function () {
 
     it("should allow owner to set ERC8183 when no pending assertions", async () => {
       const { evaluator, token } = await deployStack();
-      const newApex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const newApex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
 
       const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
         client: { wallet: deployer },
@@ -416,27 +477,10 @@ describe("APEXEvaluatorUpgradeable", async function () {
       );
     });
 
-    it("should allow owner to sync bond balance", async () => {
-      const { evaluator, token } = await deployStack();
-
-      // Send extra tokens directly
-      await token.write.mint([evaluator.address as `0x${string}`, BigInt(500)]);
-
-      const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-        client: { wallet: deployer },
-      });
-
-      await evalAsDeployer.write.syncBondBalance();
-
-      const bondBal = await evaluator.read.bondBalance();
-      // Should include the extra 500
-      assert.equal(bondBal, DEFAULT_BOND * BigInt(5) + BigInt(500));
-    });
-
-    it("should allow owner to set bond token when balance is 0", async () => {
+    it("should allow owner to set bond token when no active assertions", async () => {
       const token = await deployMockToken(viem);
       const token2 = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
       const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
 
       const evaluator = await deployEvaluatorProxy(
@@ -452,9 +496,31 @@ describe("APEXEvaluatorUpgradeable", async function () {
       assert.equal(getAddress(newBondToken as string), getAddress(token2.address));
     });
 
-    it("should revert setBondToken when balance > 0", async () => {
-      const { evaluator } = await deployStack();
+    it("should revert setBondToken when there are active assertions", async () => {
+      const { token, apex, oov3, evaluator } = await deployStack();
       const token2 = await deployMockToken(viem);
+
+      // Create an active assertion
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress,
+        evaluator.address as `0x${string}`, DEFAULT_BUDGET,
+        zeroAddress
+      );
+
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([jobId, keccak256(toHex("d")), "0x"]);
+
+      const tokenAsProvider = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: provider },
+      });
+      await tokenAsProvider.write.approve([evaluator.address, DEFAULT_BOND]);
+
+      const evalAsProvider = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: provider },
+      });
+      await evalAsProvider.write.initiateAssertion([jobId]);
 
       const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
         client: { wallet: deployer },
@@ -462,7 +528,7 @@ describe("APEXEvaluatorUpgradeable", async function () {
 
       await assert.rejects(
         evalAsDeployer.write.setBondToken([token2.address]),
-        /withdraw bond first/
+        /cannot change bond token with active assertions/
       );
     });
   });
@@ -491,6 +557,12 @@ describe("APEXEvaluatorUpgradeable", async function () {
       const { evaluator } = await deployStack();
       const end = await evaluator.read.getLivenessEnd([BigInt(999)]);
       assert.equal(end, BigInt(0));
+    });
+
+    it("jobAsserter should return zero address for job without assertion", async () => {
+      const { evaluator } = await deployStack();
+      const asserter = await evaluator.read.jobAsserter([BigInt(999)]);
+      assert.equal(asserter, zeroAddress);
     });
   });
 });

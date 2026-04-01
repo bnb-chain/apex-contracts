@@ -30,7 +30,7 @@ describe("UUPS Upgrade Tests", async function () {
   describe("AgenticCommerce Upgrade", async () => {
     it("should upgrade and preserve state", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
 
       // Create some state
       const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
@@ -68,7 +68,7 @@ describe("UUPS Upgrade Tests", async function () {
 
     it("should continue working after upgrade", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
 
       // Create and fund a job
       const jobId = await createAndFundJob(
@@ -104,7 +104,7 @@ describe("UUPS Upgrade Tests", async function () {
 
     it("should revert upgrade from non-owner", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
 
       const newImpl = await viem.deployContract("AgenticCommerceUpgradeable", [
         "0x0000000000000000000000000000000000000001"
@@ -128,43 +128,39 @@ describe("UUPS Upgrade Tests", async function () {
   describe("APEXEvaluator Upgrade", async () => {
     it("should upgrade evaluator and preserve state", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
       const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
 
       const evaluatorProxy = await deployEvaluatorProxy(
         viem, deployerAddress, apex.address, oov3.address, token.address, DEFAULT_LIVENESS
       );
 
-      // Deposit some bond
-      await token.write.mint([deployerAddress, DEFAULT_BOND * BigInt(3)]);
-      const tokenAsDeployer = await viem.getContractAt("MockERC20", token.address, {
-        client: { wallet: deployer },
-      });
-      await tokenAsDeployer.write.approve([evaluatorProxy.address, DEFAULT_BOND * BigInt(3)]);
       const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluatorProxy.address, {
         client: { wallet: deployer },
       });
-      await evalAsDeployer.write.depositBond([DEFAULT_BOND * BigInt(2)]);
 
-      // Record state
-      const bondBalBefore = await evaluatorProxy.read.bondBalance();
+      // Record state before upgrade
       const livenessBefore = await evaluatorProxy.read.liveness();
+      const erc8183Before = await evaluatorProxy.read.erc8183();
+      const totalLockedBefore = await evaluatorProxy.read.totalLockedBond();
 
       // Deploy new impl and upgrade
       const newImpl = await viem.deployContract("APEXEvaluatorUpgradeable");
       await evalAsDeployer.write.upgradeToAndCall([newImpl.address, "0x"]);
 
-      // Verify preserved
-      const bondBalAfter = await evaluatorProxy.read.bondBalance();
+      // Verify state preserved
       const livenessAfter = await evaluatorProxy.read.liveness();
+      const erc8183After = await evaluatorProxy.read.erc8183();
+      const totalLockedAfter = await evaluatorProxy.read.totalLockedBond();
 
-      assert.equal(bondBalAfter, bondBalBefore);
       assert.equal(livenessAfter, livenessBefore);
+      assert.equal(getAddress(erc8183After as string), getAddress(erc8183Before as string));
+      assert.equal(totalLockedAfter, totalLockedBefore);
     });
 
     it("should revert evaluator upgrade from non-owner", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
       const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
 
       const evaluatorProxy = await deployEvaluatorProxy(

@@ -13,12 +13,12 @@ dotenv.config();
 const SAFE_SINGLETON_FACTORY =
   "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7" as const;
 
+/** Trusted forwarder for ERC-2771 meta-transactions (address(1) = disabled) */
+const TRUSTED_FORWARDER = "0x0000000000000000000000000000000000000001" as `0x${string}`;
+
 /** Payment token address (U on BSC Testnet) */
 const PAYMENT_TOKEN_ADDRESS =
   (process.env.PAYMENT_TOKEN_ADDRESS || "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565") as `0x${string}`;
-
-/** Min budget for jobs */
-const MIN_BUDGET = BigInt(process.env.APEX_MIN_BUDGET || "0");
 
 /** Salt for APEX implementation (CREATE2) - v3 with owner param */
 const APEX_IMPL_SALT =
@@ -65,7 +65,11 @@ async function main() {
 
   // Step 1: Compute and deploy APEX implementation
   const apexImplArtifact = await hre.artifacts.readArtifact("AgenticCommerceUpgradeable");
-  const apexImplBytecode = apexImplArtifact.bytecode as Hex;
+  const commerceConstructorArgs = encodeAbiParameters(
+    [{ name: "trustedForwarder_", type: "address" }],
+    [TRUSTED_FORWARDER],
+  );
+  const apexImplBytecode = (apexImplArtifact.bytecode + commerceConstructorArgs.slice(2)) as Hex;
   const apexImplAddress = getCreate2Address({
     from: SAFE_SINGLETON_FACTORY,
     salt: APEX_IMPL_SALT,
@@ -91,7 +95,7 @@ async function main() {
   const apexInitData = encodeFunctionData({
     abi: apexImplArtifact.abi,
     functionName: "initialize",
-    args: [deployer.account.address, PAYMENT_TOKEN_ADDRESS, MIN_BUDGET],
+    args: [PAYMENT_TOKEN_ADDRESS, deployer.account.address, deployer.account.address],
   });
 
   const apexProxyBytecode = await getProxyBytecode(apexImplAddress, apexInitData);
@@ -108,7 +112,7 @@ async function main() {
     console.log("\n2. Deploying APEX proxy (direct to implementation)...");
     console.log("   Config:");
     console.log("     Payment Token:", PAYMENT_TOKEN_ADDRESS);
-    console.log("     Min Budget:", MIN_BUDGET.toString());
+    console.log("     Treasury:", deployer.account.address);
 
     const txHash = await deployer.sendTransaction({
       to: SAFE_SINGLETON_FACTORY,
