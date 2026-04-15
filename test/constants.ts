@@ -1,14 +1,13 @@
-export const Status = {
-  None: 0,
-  Open: 1,
-  Funded: 2,
-  Submitted: 3,
-  Completed: 4,
-  Rejected: 5,
-  Expired: 6,
+export const JobStatus = {
+  Open: 0,
+  Funded: 1,
+  Submitted: 2,
+  Completed: 3,
+  Rejected: 4,
+  Expired: 5,
 } as const;
 
-export const MIN_BUDGET = BigInt(1_000_000);
 export const DEFAULT_BUDGET = BigInt(10_000_000);
-export const DEFAULT_LIVENESS = BigInt(1800); // 30 minutes
-export const DEFAULT_BOND = BigInt(1_000_000_000_000_000_000); // 1e18
+export const DEFAULT_LIVENESS = BigInt(1800);
+export const DEFAULT_BOND = BigInt(1_000_000_000_000_000_000);
+export const TRUSTED_FORWARDER = "0x0000000000000000000000000000000000000001" as const;

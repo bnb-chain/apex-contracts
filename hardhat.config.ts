@@ -4,8 +4,17 @@ import type { HardhatUserConfig } from "hardhat/config";
 
 import hardhatToolboxViemPlugin from "@nomicfoundation/hardhat-toolbox-viem";
 import dotenv from "dotenv";
+import * as fs from "fs";
 
-dotenv.config();
+// Load the specified env file. dotenv v17 auto-injects .env before any code runs,
+// so override:true ensures DOTENV_CONFIG_PATH values take precedence.
+const envPath = process.env.DOTENV_CONFIG_PATH || ".env";
+if (!fs.existsSync(envPath)) {
+  console.error(`\x1b[31mFATAL: env file not found: ${envPath}\x1b[0m`);
+  process.exit(1);
+}
+dotenv.config({ path: envPath, override: true });
+console.log(`[hardhat] env loaded from ${envPath}`);
 
 const config: HardhatUserConfig = {
   plugins: [hardhatToolboxViemPlugin],
@@ -38,9 +47,9 @@ const config: HardhatUserConfig = {
   solidity: {
     profiles: {
       default: {
-        version: "0.8.24",
+        version: "0.8.28",
         settings: {
-          evmVersion: "shanghai",
+          evmVersion: "cancun",
           optimizer: {
             enabled: true,
             runs: 200,
@@ -49,9 +58,9 @@ const config: HardhatUserConfig = {
         },
       },
       production: {
-        version: "0.8.24",
+        version: "0.8.28",
         settings: {
-          evmVersion: "shanghai",
+          evmVersion: "cancun",
           optimizer: {
             enabled: true,
             runs: 200,

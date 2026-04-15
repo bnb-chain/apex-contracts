@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
 import { getAddress, keccak256, toHex, zeroAddress } from "viem";
-import { Status, DEFAULT_BUDGET, DEFAULT_BOND, DEFAULT_LIVENESS } from "./constants.js";
+import { JobStatus, DEFAULT_BUDGET, DEFAULT_BOND, DEFAULT_LIVENESS } from "./constants.js";
 import {
   deployMockToken,
   mintTokens,
@@ -24,22 +24,20 @@ describe("Full Job Lifecycle (Integration)", async function () {
 
   async function deployFullStack() {
     const token = await deployMockToken(viem);
-    const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+    const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
     const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
     const evaluator = await deployEvaluatorProxy(
       viem, deployerAddress, apex.address, oov3.address, token.address, DEFAULT_LIVENESS
     );
 
-    // Fund evaluator bond
-    await token.write.mint([deployerAddress, DEFAULT_BOND * BigInt(10)]);
-    const tokenAsDeployer = await viem.getContractAt("MockERC20", token.address, {
+    // Whitelist the evaluator as a hook (required by new contract)
+    const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
       client: { wallet: deployer },
     });
-    await tokenAsDeployer.write.approve([evaluator.address, DEFAULT_BOND * BigInt(10)]);
-    const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
-      client: { wallet: deployer },
-    });
-    await evalAsDeployer.write.depositBond([DEFAULT_BOND * BigInt(5)]);
+    await apexAsDeployer.write.setHookWhitelist([evaluator.address as `0x${string}`, true]);
+
+    // Mint bond tokens to provider — they pay the bond when initiating assertions
+    await token.write.mint([providerAddress, DEFAULT_BOND * BigInt(10)]);
 
     return { token, apex, oov3, evaluator };
   }
@@ -69,7 +67,7 @@ describe("Full Job Lifecycle (Integration)", async function () {
       ]);
 
       let job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Open);
+      assert.equal(job.status, JobStatus.Open);
 
       // 2. Set budget (client)
       await apexAsClient.write.setBudget([BigInt(1), budget, "0x"]);
@@ -83,18 +81,33 @@ describe("Full Job Lifecycle (Integration)", async function () {
       await apexAsClient.write.fund([BigInt(1), budget, "0x"]);
 
       job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Funded);
+      assert.equal(job.status, JobStatus.Funded);
 
-      // 4. Submit (provider) — triggers auto-assertion via hook
+      // 4. Submit (provider) — hook stores deliverable but does NOT auto-initiate assertion
       const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: provider },
       });
       await apexAsProvider.write.submit([BigInt(1), deliverable, "0x"]);
 
       job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Submitted);
+      assert.equal(job.status, JobStatus.Submitted);
 
-      // Verify assertion was auto-initiated
+      // Verify assertion was NOT auto-initiated
+      const initiatedBeforeManual = await evaluator.read.jobAssertionInitiated([BigInt(1)]);
+      assert.equal(initiatedBeforeManual, false);
+
+      // 4b. Provider approves bond token and initiates assertion manually
+      const tokenAsProvider = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: provider },
+      });
+      await tokenAsProvider.write.approve([evaluator.address as `0x${string}`, DEFAULT_BOND]);
+
+      const evalAsProvider = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluator.address, {
+        client: { wallet: provider },
+      });
+      await evalAsProvider.write.initiateAssertion([BigInt(1)]);
+
+      // Verify assertion is now initiated
       const initiated = await evaluator.read.jobAssertionInitiated([BigInt(1)]);
       assert.equal(initiated, true);
 
@@ -112,24 +125,33 @@ describe("Full Job Lifecycle (Integration)", async function () {
       const pending = await evaluator.read.pendingAssertions();
       assert.equal(pending, BigInt(0));
 
+      // 8. Verify bond returned to provider (totalLockedBond back to 0)
+      const totalLocked = await evaluator.read.totalLockedBond();
+      assert.equal(totalLocked, BigInt(0));
+
       // The settlement callback calls apex.complete() via try-catch.
       // In test environments with mock OOv3, the complete may be silently caught
       // due to reentrancy guard interactions. Verify the assertion was resolved
       // and the bond returned.
       job = await apex.read.getJob([BigInt(1)]);
-      if (job.status === Status.Completed) {
+      if (job.status === JobStatus.Completed) {
         // Full happy path worked end-to-end
+        // Provider: started with 10 bond tokens, paid 1 bond, got 1 back + budget payment
         const providerBalance = await token.read.balanceOf([providerAddress]);
-        assert.equal(providerBalance, budget);
-        const totalEscrowed = await apex.read.totalEscrowed();
-        assert.equal(totalEscrowed, BigInt(0));
+        assert.equal(providerBalance, DEFAULT_BOND * BigInt(10) + budget);
+        // Contract no longer exposes totalEscrowed; verify escrow via token balance
+        const contractBalance = await token.read.balanceOf([apex.address]);
+        assert.equal(contractBalance, BigInt(0));
       } else {
         // Settlement resolved but complete was caught by try-catch.
         // This is expected behavior — the contract is designed to handle this
         // gracefully (M01 audit fix). The assertion was still resolved.
-        assert.equal(job.status, Status.Submitted);
+        assert.equal(job.status, JobStatus.Submitted);
         const assertionId = await evaluator.read.jobToAssertion([BigInt(1)]);
         assert.notEqual(assertionId, "0x0000000000000000000000000000000000000000000000000000000000000000");
+        // Bond returned to provider: paid 1, got 1 back → net 10 bond tokens
+        const providerBalance = await token.read.balanceOf([providerAddress]);
+        assert.equal(providerBalance, DEFAULT_BOND * BigInt(10));
       }
     });
   });
@@ -174,7 +196,7 @@ describe("Full Job Lifecycle (Integration)", async function () {
       const [, , , , humanEvaluator] = await viem.getWalletClients();
 
       // Create new job with human evaluator
-      const apex2 = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex2 = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
       const apexAsClient2 = await viem.getContractAt("AgenticCommerceUpgradeable", apex2.address, {
         client: { wallet: client },
       });
@@ -199,7 +221,7 @@ describe("Full Job Lifecycle (Integration)", async function () {
       await apexAsEval.write.reject([BigInt(1), keccak256(toHex("nope")), "0x"]);
 
       const job = await apex2.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Rejected);
+      assert.equal(job.status, JobStatus.Rejected);
 
       // Client refunded
       const clientBalAfter = await token.read.balanceOf([clientAddress]);
@@ -217,7 +239,8 @@ describe("Full Job Lifecycle (Integration)", async function () {
 
       const budget = DEFAULT_BUDGET;
       const block = await publicClient.getBlock();
-      const expiredAt = block.timestamp + BigInt(60);
+      // Contract requires expiredAt > block.timestamp + 5 minutes; use 6 minutes
+      const expiredAt = block.timestamp + BigInt(360);
 
       const [, , , , humanEvaluator] = await viem.getWalletClients();
 
@@ -246,8 +269,8 @@ describe("Full Job Lifecycle (Integration)", async function () {
       });
       await apexAsProvider.write.submit([BigInt(1), keccak256(toHex("work")), "0x"]);
 
-      // Fast forward past expiry
-      await testClient.increaseTime({ seconds: 120 });
+      // Fast forward past expiry (expiredAt is 360s from now, fast-forward 400s)
+      await testClient.increaseTime({ seconds: 400 });
       await testClient.mine({ blocks: 1 });
 
       // Anyone can claim refund
@@ -257,13 +280,14 @@ describe("Full Job Lifecycle (Integration)", async function () {
       await apexAsOther.write.claimRefund([BigInt(1)]);
 
       const job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Expired);
+      assert.equal(job.status, JobStatus.Expired);
 
       const clientBalance = await token.read.balanceOf([clientAddress]);
       assert.equal(clientBalance, budget);
 
-      const totalEscrowed = await apex.read.totalEscrowed();
-      assert.equal(totalEscrowed, BigInt(0));
+      // Contract no longer exposes totalEscrowed; verify via token balance
+      const contractBalance = await token.read.balanceOf([apex.address]);
+      assert.equal(contractBalance, BigInt(0));
     });
   });
 
@@ -299,7 +323,8 @@ describe("Full Job Lifecycle (Integration)", async function () {
       await apexAsClient.write.fund([BigInt(1), budget, "0x"]);
       await apexAsClient.write.fund([BigInt(2), budget, "0x"]);
 
-      assert.equal(await apex.read.totalEscrowed(), budget * BigInt(2));
+      // Contract no longer exposes totalEscrowed; verify via token balance
+      assert.equal(await token.read.balanceOf([apex.address]), budget * BigInt(2));
 
       // Submit both
       const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -317,19 +342,20 @@ describe("Full Job Lifecycle (Integration)", async function () {
 
       const job1 = await apex.read.getJob([BigInt(1)]);
       const job2 = await apex.read.getJob([BigInt(2)]);
-      assert.equal(job1.status, Status.Completed);
-      assert.equal(job2.status, Status.Rejected);
+      assert.equal(job1.status, JobStatus.Completed);
+      assert.equal(job2.status, JobStatus.Rejected);
 
       // Provider got paid for job 1
+      // Note: deployFullStack() mints DEFAULT_BOND * 10 to provider for potential assertions
       const providerBal = await token.read.balanceOf([providerAddress]);
-      assert.equal(providerBal, budget);
+      assert.equal(providerBal, DEFAULT_BOND * BigInt(10) + budget);
 
       // Client got refunded for job 2
       const clientBal = await token.read.balanceOf([clientAddress]);
       assert.equal(clientBal, budget);
 
-      // Escrow should be zero
-      assert.equal(await apex.read.totalEscrowed(), BigInt(0));
+      // Escrow should be zero (verified via token balance)
+      assert.equal(await token.read.balanceOf([apex.address]), BigInt(0));
     });
   });
 });

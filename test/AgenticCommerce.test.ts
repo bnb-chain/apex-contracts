@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
 import { getAddress, keccak256, toHex, zeroAddress } from "viem";
-import { Status, MIN_BUDGET, DEFAULT_BUDGET } from "./constants.js";
-import { deployMockToken, mintTokens, deployAPEXProxy, createAndFundJob } from "./deploy.js";
+import { JobStatus, DEFAULT_BUDGET } from "./constants.js";
+import { deployMockToken, deployAPEXProxy, createAndFundJob } from "./deploy.js";
 
 describe("AgenticCommerceUpgradeable", async function () {
   const { viem } = await network.connect();
@@ -18,6 +18,12 @@ describe("AgenticCommerceUpgradeable", async function () {
   const treasuryAddress = getAddress(treasury.account.address);
   const otherAddress = getAddress(other.account.address);
 
+  // Helper: get current block timestamp + offset
+  async function futureTimestamp(offsetSeconds = 3600): Promise<bigint> {
+    const block = await publicClient.getBlock();
+    return block.timestamp + BigInt(offsetSeconds);
+  }
+
   // ============================================================
   // Deployment Tests
   // ============================================================
@@ -25,55 +31,52 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("Deployment", async () => {
     it("should initialize with correct parameters", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       const paymentToken = await apex.read.paymentToken();
-      const minBudget = await apex.read.minBudget();
-      const nextJobId = await apex.read.nextJobId();
-      const owner = await apex.read.owner();
+      const platformTreasury = await apex.read.platformTreasury();
+      const jobCounter = await apex.read.jobCounter();
 
       assert.equal(getAddress(paymentToken), getAddress(token.address));
-      assert.equal(minBudget, MIN_BUDGET);
-      assert.equal(nextJobId, BigInt(1));
-      assert.equal(getAddress(owner), deployerAddress);
+      assert.equal(getAddress(platformTreasury), treasuryAddress);
+      assert.equal(jobCounter, BigInt(0));
+    });
+
+    it("should grant ADMIN_ROLE and DEFAULT_ADMIN_ROLE to deployer", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const ADMIN_ROLE = await apex.read.ADMIN_ROLE();
+      const DEFAULT_ADMIN_ROLE = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`;
+
+      const hasAdmin = await apex.read.hasRole([ADMIN_ROLE, deployerAddress]);
+      const hasDefaultAdmin = await apex.read.hasRole([DEFAULT_ADMIN_ROLE, deployerAddress]);
+
+      assert.equal(hasAdmin, true);
+      assert.equal(hasDefaultAdmin, true);
     });
 
     it("should not allow re-initialization", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
       await assert.rejects(
-        apex.write.initialize([deployerAddress, token.address, BigInt(0)]),
+        apex.write.initialize([token.address, treasuryAddress, deployerAddress]),
         /InvalidInitialization/
-      );
-    });
-
-    it("should revert with zero payment token", async () => {
-      const impl = await viem.deployContract("AgenticCommerceUpgradeable");
-
-      await assert.rejects(
-        viem.deployContract("ERC1967Proxy", [
-          impl.address,
-          // Manually encode initialize with zero token
-          "0xc0c53b8b" + // initialize(address,address,uint256)
-          "0000000000000000000000000000000000000000000000000000000000000001" +
-          "0000000000000000000000000000000000000000000000000000000000000000" +
-          "0000000000000000000000000000000000000000000000000000000000000000",
-        ])
       );
     });
   });
 
   // ============================================================
-  // Job Creation Tests
+  // createJob Tests
   // ============================================================
 
   describe("createJob", async () => {
     it("should create a job with provider and evaluator", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const description = "Test job description";
 
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -89,18 +92,19 @@ describe("AgenticCommerceUpgradeable", async function () {
       ]);
 
       const job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.id, BigInt(1));
       assert.equal(getAddress(job.client), clientAddress);
       assert.equal(getAddress(job.provider), providerAddress);
       assert.equal(getAddress(job.evaluator), evaluatorAddress);
-      assert.equal(job.status, Status.Open);
+      assert.equal(job.status, JobStatus.Open);
       assert.equal(job.description, description);
     });
 
     it("should create a job without provider (set later)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -115,14 +119,14 @@ describe("AgenticCommerceUpgradeable", async function () {
 
       const job = await apex.read.getJob([BigInt(1)]);
       assert.equal(getAddress(job.provider), zeroAddress);
-      assert.equal(job.status, Status.Open);
+      assert.equal(job.status, JobStatus.Open);
     });
 
-    it("should revert with zero evaluator", async () => {
+    it("should revert with zero evaluator (ZeroAddress)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -135,15 +139,16 @@ describe("AgenticCommerceUpgradeable", async function () {
           "Invalid job",
           zeroAddress,
         ]),
-        /InvalidEvaluator/
+        /ZeroAddress/
       );
     });
 
-    it("should revert with expired timestamp", async () => {
+    it("should revert when expiry is too short (ExpiryTooShort)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) - 100);
+      // Less than 5 minutes in the future
+      const expiredAt = await futureTimestamp(60);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -153,39 +158,18 @@ describe("AgenticCommerceUpgradeable", async function () {
           providerAddress,
           evaluatorAddress,
           expiredAt,
-          "Expired job",
+          "Expiry too short",
           zeroAddress,
         ]),
-        /InvalidExpiry/
+        /ExpiryTooShort/
       );
     });
 
-    it("should revert if expiry exceeds MAX_EXPIRY_DURATION", async () => {
+    it("should increment jobCounter for each new job", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000)) + BigInt(366 * 24 * 60 * 60);
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: client },
-      });
-
-      await assert.rejects(
-        apexAsClient.write.createJob([
-          providerAddress,
-          evaluatorAddress,
-          expiredAt,
-          "Too far",
-          zeroAddress,
-        ]),
-        /InvalidExpiry/
-      );
-    });
-
-    it("should increment jobId for each new job", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -193,8 +177,13 @@ describe("AgenticCommerceUpgradeable", async function () {
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job 1", zeroAddress]);
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job 2", zeroAddress]);
 
-      const nextJobId = await apex.read.nextJobId();
-      assert.equal(nextJobId, BigInt(3));
+      const jobCounter = await apex.read.jobCounter();
+      assert.equal(jobCounter, BigInt(2));
+
+      const job1 = await apex.read.getJob([BigInt(1)]);
+      const job2 = await apex.read.getJob([BigInt(2)]);
+      assert.equal(job1.id, BigInt(1));
+      assert.equal(job2.id, BigInt(2));
     });
   });
 
@@ -203,11 +192,11 @@ describe("AgenticCommerceUpgradeable", async function () {
   // ============================================================
 
   describe("setProvider", async () => {
-    it("should set provider for job created without one", async () => {
+    it("should allow client to set provider", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -219,11 +208,11 @@ describe("AgenticCommerceUpgradeable", async function () {
       assert.equal(getAddress(job.provider), providerAddress);
     });
 
-    it("should revert if not client", async () => {
+    it("should revert if not client (Unauthorized)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -236,32 +225,33 @@ describe("AgenticCommerceUpgradeable", async function () {
 
       await assert.rejects(
         apexAsOther.write.setProvider([BigInt(1), providerAddress, "0x"]),
-        /NotClient/
+        /Unauthorized/
       );
     });
 
-    it("should revert if provider already set", async () => {
+    it("should revert if provider already set (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
 
+      // Create job with provider already set
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
 
       await assert.rejects(
         apexAsClient.write.setProvider([BigInt(1), otherAddress, "0x"]),
-        /ProviderAlreadySet/
+        /WrongStatus/
       );
     });
 
-    it("should revert with zero provider address", async () => {
+    it("should revert with zero provider address (ZeroAddress)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -270,7 +260,7 @@ describe("AgenticCommerceUpgradeable", async function () {
 
       await assert.rejects(
         apexAsClient.write.setProvider([BigInt(1), zeroAddress, "0x"]),
-        /InvalidProvider/
+        /ZeroAddress/
       );
     });
   });
@@ -282,9 +272,9 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("setBudget", async () => {
     it("should allow client to set budget", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -300,9 +290,9 @@ describe("AgenticCommerceUpgradeable", async function () {
 
     it("should allow provider to set budget", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -313,18 +303,18 @@ describe("AgenticCommerceUpgradeable", async function () {
         client: { wallet: provider },
       });
 
-      const budget = BigInt(5000000);
+      const budget = DEFAULT_BUDGET;
       await apexAsProvider.write.setBudget([BigInt(1), budget, "0x"]);
 
       const job = await apex.read.getJob([BigInt(1)]);
       assert.equal(job.budget, budget);
     });
 
-    it("should revert if not client or provider", async () => {
+    it("should revert if unauthorized (Unauthorized)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
@@ -336,8 +326,27 @@ describe("AgenticCommerceUpgradeable", async function () {
       });
 
       await assert.rejects(
-        apexAsOther.write.setBudget([BigInt(1), BigInt(1000000), "0x"]),
-        /NotClientOrProvider/
+        apexAsOther.write.setBudget([BigInt(1), DEFAULT_BUDGET, "0x"]),
+        /Unauthorized/
+      );
+    });
+
+    it("should revert when job is not Open (WrongStatus)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET
+      );
+
+      // Job is now Funded — setBudget should fail
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      await assert.rejects(
+        apexAsClient.write.setBudget([jobId, DEFAULT_BUDGET, "0x"]),
+        /WrongStatus/
       );
     });
   });
@@ -347,124 +356,117 @@ describe("AgenticCommerceUpgradeable", async function () {
   // ============================================================
 
   describe("fund", async () => {
-    it("should fund job and transition to Funded status", async () => {
+    it("should fund job when expectedBudget matches", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const budget = DEFAULT_BUDGET;
-
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
 
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
-      await apexAsClient.write.setBudget([BigInt(1), budget, "0x"]);
+      await apexAsClient.write.setBudget([BigInt(1), DEFAULT_BUDGET, "0x"]);
 
-      await mintTokens(token, clientAddress, budget);
+      await token.write.mint([clientAddress, DEFAULT_BUDGET]);
       const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
         client: { wallet: client },
       });
-      await tokenAsClient.write.approve([apex.address, budget]);
-      await apexAsClient.write.fund([BigInt(1), budget, "0x"]);
+      await tokenAsClient.write.approve([apex.address, DEFAULT_BUDGET]);
+      await apexAsClient.write.fund([BigInt(1), DEFAULT_BUDGET, "0x"]);
 
       const job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Funded);
-
-      const contractBalance = await token.read.balanceOf([apex.address]);
-      assert.equal(contractBalance, budget);
-
-      const totalEscrowed = await apex.read.totalEscrowed();
-      assert.equal(totalEscrowed, budget);
+      assert.equal(job.status, JobStatus.Funded);
     });
 
-    it("should revert if budget mismatch (front-running protection)", async () => {
+    it("should transfer tokens to contract on fund", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const budget = DEFAULT_BUDGET;
-
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
 
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
-      await apexAsClient.write.setBudget([BigInt(1), budget, "0x"]);
+      await apexAsClient.write.setBudget([BigInt(1), DEFAULT_BUDGET, "0x"]);
 
-      await mintTokens(token, clientAddress, budget);
+      await token.write.mint([clientAddress, DEFAULT_BUDGET]);
       const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
         client: { wallet: client },
       });
-      await tokenAsClient.write.approve([apex.address, budget]);
+      await tokenAsClient.write.approve([apex.address, DEFAULT_BUDGET]);
+
+      const balanceBefore = await token.read.balanceOf([apex.address]);
+      await apexAsClient.write.fund([BigInt(1), DEFAULT_BUDGET, "0x"]);
+      const balanceAfter = await token.read.balanceOf([apex.address]);
+
+      assert.equal(balanceAfter - balanceBefore, DEFAULT_BUDGET);
+    });
+
+    it("should revert on budget mismatch (BudgetMismatch)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
+      await apexAsClient.write.setBudget([BigInt(1), DEFAULT_BUDGET, "0x"]);
+
+      await token.write.mint([clientAddress, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: client },
+      });
+      await tokenAsClient.write.approve([apex.address, DEFAULT_BUDGET]);
 
       await assert.rejects(
-        apexAsClient.write.fund([BigInt(1), BigInt(5000000), "0x"]),
+        apexAsClient.write.fund([BigInt(1), DEFAULT_BUDGET + BigInt(1), "0x"]),
         /BudgetMismatch/
       );
     });
 
-    it("should revert if provider not set", async () => {
+    it("should revert when budget is zero (ZeroBudget)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const budget = DEFAULT_BUDGET;
-
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
 
-      await apexAsClient.write.createJob([zeroAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
-      await apexAsClient.write.setBudget([BigInt(1), budget, "0x"]);
-
-      await assert.rejects(
-        apexAsClient.write.fund([BigInt(1), budget, "0x"]),
-        /ProviderNotSet/
-      );
-    });
-
-    it("should revert if budget too low", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, BigInt(10_000_000));
-
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const budget = BigInt(100); // below min
-
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: client },
-      });
-
-      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
-      await apexAsClient.write.setBudget([BigInt(1), budget, "0x"]);
-
-      await mintTokens(token, clientAddress, budget);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
-        client: { wallet: client },
-      });
-      await tokenAsClient.write.approve([apex.address, budget]);
-
-      await assert.rejects(
-        apexAsClient.write.fund([BigInt(1), budget, "0x"]),
-        /BudgetTooLow/
-      );
-    });
-
-    it("should revert if budget not set", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: client },
-      });
-
+      // Create job without setting budget (budget remains 0)
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
 
       await assert.rejects(
         apexAsClient.write.fund([BigInt(1), BigInt(0), "0x"]),
-        /BudgetNotSet/
+        /ZeroBudget/
+      );
+    });
+
+    it("should revert when no provider set (ProviderNotSet)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      await apexAsClient.write.createJob([zeroAddress, evaluatorAddress, expiredAt, "No provider job", zeroAddress]);
+      await apexAsClient.write.setBudget([BigInt(1), DEFAULT_BUDGET, "0x"]);
+
+      await token.write.mint([clientAddress, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: client },
+      });
+      await tokenAsClient.write.approve([apex.address, DEFAULT_BUDGET]);
+
+      await assert.rejects(
+        apexAsClient.write.fund([BigInt(1), DEFAULT_BUDGET, "0x"]),
+        /ProviderNotSet/
       );
     });
   });
@@ -474,56 +476,59 @@ describe("AgenticCommerceUpgradeable", async function () {
   // ============================================================
 
   describe("submit", async () => {
-    it("should allow provider to submit work", async () => {
+    it("should allow provider to submit a funded job", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-      const deliverable = keccak256(toHex("deliverable-cid"));
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
       const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: provider },
       });
-      await apexAsProvider.write.submit([jobId, deliverable, "0x"]);
 
-      const job = await apex.read.getJob([jobId]);
-      assert.equal(job.status, Status.Submitted);
-      assert.equal(job.deliverable, deliverable);
+      const deliverable = keccak256(toHex("deliverable content"));
+      await apexAsProvider.write.submit([BigInt(1), deliverable, "0x"]);
+
+      const job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Submitted);
     });
 
-    it("should revert if not provider", async () => {
+    it("should revert if not Funded (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
-
+      const expiredAt = await futureTimestamp(3600);
       const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: client },
       });
 
-      await assert.rejects(
-        apexAsClient.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]),
-        /NotProvider/
-      );
-    });
-
-    it("should revert if job not funded", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: client },
-      });
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
 
       const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: provider },
       });
 
+      const deliverable = keccak256(toHex("deliverable"));
       await assert.rejects(
-        apexAsProvider.write.submit([BigInt(1), keccak256(toHex("d")), "0x"]),
-        /InvalidStatus/
+        apexAsProvider.write.submit([BigInt(1), deliverable, "0x"]),
+        /WrongStatus/
+      );
+    });
+
+    it("should revert if not provider (Unauthorized)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+
+      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: other },
+      });
+
+      const deliverable = keccak256(toHex("deliverable"));
+      await assert.rejects(
+        apexAsOther.write.submit([BigInt(1), deliverable, "0x"]),
+        /Unauthorized/
       );
     });
   });
@@ -533,58 +538,83 @@ describe("AgenticCommerceUpgradeable", async function () {
   // ============================================================
 
   describe("complete", async () => {
-    it("should allow evaluator to complete job and release payment", async () => {
+    it("should allow evaluator to complete a submitted job", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-      const deliverable = keccak256(toHex("deliverable"));
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
-      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: provider } });
-      await apexAsProvider.write.submit([jobId, deliverable, "0x"]);
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([BigInt(1), keccak256(toHex("deliverable")), "0x"]);
 
-      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: evaluator } });
-      const reason = keccak256(toHex("approved"));
-      await apexAsEvaluator.write.complete([jobId, reason, "0x"]);
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      await apexAsEvaluator.write.complete([BigInt(1), keccak256(toHex("reason")), "0x"]);
 
-      const job = await apex.read.getJob([jobId]);
-      assert.equal(job.status, Status.Completed);
-
-      const providerBalance = await token.read.balanceOf([providerAddress]);
-      assert.equal(providerBalance, DEFAULT_BUDGET);
-
-      const totalEscrowed = await apex.read.totalEscrowed();
-      assert.equal(totalEscrowed, BigInt(0));
+      const job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Completed);
     });
 
-    it("should revert if not evaluator", async () => {
+    it("should pay full budget to provider when no fees set", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
-      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: provider } });
-      await apexAsProvider.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]);
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([BigInt(1), keccak256(toHex("deliverable")), "0x"]);
 
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: client } });
+      const providerBalanceBefore = await token.read.balanceOf([providerAddress]);
+
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      await apexAsEvaluator.write.complete([BigInt(1), keccak256(toHex("reason")), "0x"]);
+
+      const providerBalanceAfter = await token.read.balanceOf([providerAddress]);
+      assert.equal(providerBalanceAfter - providerBalanceBefore, DEFAULT_BUDGET);
+    });
+
+    it("should revert if not evaluator (Unauthorized)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([BigInt(1), keccak256(toHex("deliverable")), "0x"]);
+
+      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: other },
+      });
 
       await assert.rejects(
-        apexAsClient.write.complete([jobId, keccak256(toHex("reason")), "0x"]),
-        /NotEvaluator/
+        apexAsOther.write.complete([BigInt(1), keccak256(toHex("reason")), "0x"]),
+        /Unauthorized/
       );
     });
 
-    it("should revert if job not submitted", async () => {
+    it("should revert if not Submitted (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
-      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: evaluator } });
+      // Job is Funded, not Submitted
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
 
       await assert.rejects(
-        apexAsEvaluator.write.complete([jobId, keccak256(toHex("reason")), "0x"]),
-        /InvalidStatus/
+        apexAsEvaluator.write.complete([BigInt(1), keccak256(toHex("reason")), "0x"]),
+        /WrongStatus/
       );
     });
   });
@@ -594,90 +624,85 @@ describe("AgenticCommerceUpgradeable", async function () {
   // ============================================================
 
   describe("reject", async () => {
-    it("should allow client to reject job when Open", async () => {
+    it("should allow client to reject an Open job", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: client } });
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
-
-      const reason = keccak256(toHex("cancelled"));
-      await apexAsClient.write.reject([BigInt(1), reason, "0x"]);
+      await apexAsClient.write.reject([BigInt(1), keccak256(toHex("reason")), "0x"]);
 
       const job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Rejected);
+      assert.equal(job.status, JobStatus.Rejected);
     });
 
-    it("should allow evaluator to reject and refund when Funded", async () => {
+    it("should allow evaluator to reject a Funded job with refund", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
       const clientBalanceBefore = await token.read.balanceOf([clientAddress]);
-      assert.equal(clientBalanceBefore, BigInt(0));
 
-      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: evaluator } });
-      await apexAsEvaluator.write.reject([jobId, keccak256(toHex("rejected")), "0x"]);
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      await apexAsEvaluator.write.reject([BigInt(1), keccak256(toHex("reason")), "0x"]);
 
-      const job = await apex.read.getJob([jobId]);
-      assert.equal(job.status, Status.Rejected);
+      const job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Rejected);
 
       const clientBalanceAfter = await token.read.balanceOf([clientAddress]);
-      assert.equal(clientBalanceAfter, DEFAULT_BUDGET);
+      assert.equal(clientBalanceAfter - clientBalanceBefore, DEFAULT_BUDGET);
     });
 
-    it("should allow evaluator to reject and refund when Submitted", async () => {
+    it("should allow evaluator to reject a Submitted job with refund", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
-      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: provider } });
-      await apexAsProvider.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]);
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([BigInt(1), keccak256(toHex("deliverable")), "0x"]);
 
-      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: evaluator } });
-      await apexAsEvaluator.write.reject([jobId, keccak256(toHex("rejected")), "0x"]);
+      const clientBalanceBefore = await token.read.balanceOf([clientAddress]);
 
-      const job = await apex.read.getJob([jobId]);
-      assert.equal(job.status, Status.Rejected);
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      await apexAsEvaluator.write.reject([BigInt(1), keccak256(toHex("reason")), "0x"]);
 
-      const clientBalance = await token.read.balanceOf([clientAddress]);
-      assert.equal(clientBalance, DEFAULT_BUDGET);
+      const job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Rejected);
+
+      const clientBalanceAfter = await token.read.balanceOf([clientAddress]);
+      assert.equal(clientBalanceAfter - clientBalanceBefore, DEFAULT_BUDGET);
     });
 
-    it("should revert if non-client rejects Open job", async () => {
+    it("should revert if unauthorized (Unauthorized)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: client } });
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
 
-      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: other } });
+      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: other },
+      });
 
       await assert.rejects(
         apexAsOther.write.reject([BigInt(1), keccak256(toHex("reason")), "0x"]),
-        /NotClient/
-      );
-    });
-
-    it("should revert if rejecting completed job", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
-
-      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: provider } });
-      await apexAsProvider.write.submit([jobId, keccak256(toHex("d")), "0x"]);
-
-      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: evaluator } });
-      await apexAsEvaluator.write.complete([jobId, keccak256(toHex("ok")), "0x"]);
-
-      await assert.rejects(
-        apexAsEvaluator.write.reject([jobId, keccak256(toHex("r")), "0x"]),
-        /NotRefundable/
+        /Unauthorized/
       );
     });
   });
@@ -689,257 +714,616 @@ describe("AgenticCommerceUpgradeable", async function () {
   describe("claimRefund", async () => {
     it("should refund client after expiry", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const block = await publicClient.getBlock();
-      const expiredAt = block.timestamp + BigInt(60);
-      const budget = DEFAULT_BUDGET;
+      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
 
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: client } });
-      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
-      await apexAsClient.write.setBudget([BigInt(1), budget, "0x"]);
-
-      await mintTokens(token, clientAddress, budget);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, { client: { wallet: client } });
-      await tokenAsClient.write.approve([apex.address, budget]);
-      await apexAsClient.write.fund([BigInt(1), budget, "0x"]);
-
-      await testClient.increaseTime({ seconds: 120 });
-      await testClient.mine({ blocks: 1 });
-
-      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: other } });
-      await apexAsOther.write.claimRefund([BigInt(1)]);
-
+      // Travel past expiry
       const job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Expired);
-
-      const clientBalance = await token.read.balanceOf([clientAddress]);
-      assert.equal(clientBalance, budget);
-    });
-
-    it("should refund when Submitted and expired", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const block = await publicClient.getBlock();
-      const expiredAt = block.timestamp + BigInt(60);
-      const budget = DEFAULT_BUDGET;
-
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: client } });
-      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
-      await apexAsClient.write.setBudget([BigInt(1), budget, "0x"]);
-
-      await mintTokens(token, clientAddress, budget);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, { client: { wallet: client } });
-      await tokenAsClient.write.approve([apex.address, budget]);
-      await apexAsClient.write.fund([BigInt(1), budget, "0x"]);
-
-      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: provider } });
-      await apexAsProvider.write.submit([BigInt(1), keccak256(toHex("d")), "0x"]);
-
-      await testClient.increaseTime({ seconds: 120 });
+      await testClient.setNextBlockTimestamp({ timestamp: job.expiredAt + BigInt(1) });
       await testClient.mine({ blocks: 1 });
 
+      const clientBalanceBefore = await token.read.balanceOf([clientAddress]);
+
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
       await apexAsClient.write.claimRefund([BigInt(1)]);
 
-      const job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.status, Status.Expired);
+      const jobAfter = await apex.read.getJob([BigInt(1)]);
+      assert.equal(jobAfter.status, JobStatus.Expired);
+
+      const clientBalanceAfter = await token.read.balanceOf([clientAddress]);
+      assert.equal(clientBalanceAfter - clientBalanceBefore, DEFAULT_BUDGET);
     });
 
-    it("should revert if not expired", async () => {
+    it("should revert before expiry (WrongStatus)", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+      // Use a far-future expiry so the job is definitely not expired yet
+      const expiredAt = await futureTimestamp(86400 * 365);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
+      await apexAsClient.write.setBudget([BigInt(1), DEFAULT_BUDGET, "0x"]);
+
+      await token.write.mint([clientAddress, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: client },
+      });
+      await tokenAsClient.write.approve([apex.address, DEFAULT_BUDGET]);
+      await apexAsClient.write.fund([BigInt(1), DEFAULT_BUDGET, "0x"]);
+
+      // Job has not expired yet
+      await assert.rejects(
+        apexAsClient.write.claimRefund([BigInt(1)]),
+        /WrongStatus/
+      );
+    });
+
+    it("should revert for non-Funded/Submitted job (WrongStatus)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      // Open job — not in Funded/Submitted state
+      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
+
+      await assert.rejects(
+        apexAsClient.write.claimRefund([BigInt(1)]),
+        /WrongStatus/
+      );
+    });
+  });
+
+  // ============================================================
+  // Fees Tests
+  // ============================================================
+
+  describe("Fees", async () => {
+    it("setPlatformFee sets fee and treasury, only ADMIN_ROLE", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+
+      await apexAsDeployer.write.setPlatformFee([BigInt(250), otherAddress]);
+
+      const feeBP = await apex.read.platformFeeBP();
+      const treas = await apex.read.platformTreasury();
+      assert.equal(feeBP, BigInt(250));
+      assert.equal(getAddress(treas), otherAddress);
+    });
+
+    it("setEvaluatorFee sets fee, only ADMIN_ROLE", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+
+      await apexAsDeployer.write.setEvaluatorFee([BigInt(500)]);
+
+      const feeBP = await apex.read.evaluatorFeeBP();
+      assert.equal(feeBP, BigInt(500));
+    });
+
+    it("complete() with platformFee=250bp: treasury gets 2.5%, provider gets 97.5%", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.setPlatformFee([BigInt(250), treasuryAddress]);
+
+      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]);
+
+      const treasuryBalanceBefore = await token.read.balanceOf([treasuryAddress]);
+      const providerBalanceBefore = await token.read.balanceOf([providerAddress]);
+
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      await apexAsEvaluator.write.complete([jobId, keccak256(toHex("reason")), "0x"]);
+
+      const treasuryBalanceAfter = await token.read.balanceOf([treasuryAddress]);
+      const providerBalanceAfter = await token.read.balanceOf([providerAddress]);
+
+      const expectedPlatformFee = (DEFAULT_BUDGET * BigInt(250)) / BigInt(10000);
+      const expectedNet = DEFAULT_BUDGET - expectedPlatformFee;
+
+      assert.equal(treasuryBalanceAfter - treasuryBalanceBefore, expectedPlatformFee);
+      assert.equal(providerBalanceAfter - providerBalanceBefore, expectedNet);
+    });
+
+    it("complete() with platformFee=250bp + evaluatorFee=500bp: treasury gets 2.5%, evaluator gets 5%, provider gets 92.5%", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.setPlatformFee([BigInt(250), treasuryAddress]);
+      await apexAsDeployer.write.setEvaluatorFee([BigInt(500)]);
+
+      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]);
+
+      const treasuryBalanceBefore = await token.read.balanceOf([treasuryAddress]);
+      const evaluatorBalanceBefore = await token.read.balanceOf([evaluatorAddress]);
+      const providerBalanceBefore = await token.read.balanceOf([providerAddress]);
+
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      await apexAsEvaluator.write.complete([jobId, keccak256(toHex("reason")), "0x"]);
+
+      const treasuryBalanceAfter = await token.read.balanceOf([treasuryAddress]);
+      const evaluatorBalanceAfter = await token.read.balanceOf([evaluatorAddress]);
+      const providerBalanceAfter = await token.read.balanceOf([providerAddress]);
+
+      const expectedPlatformFee = (DEFAULT_BUDGET * BigInt(250)) / BigInt(10000);
+      const expectedEvalFee = (DEFAULT_BUDGET * BigInt(500)) / BigInt(10000);
+      const expectedNet = DEFAULT_BUDGET - expectedPlatformFee - expectedEvalFee;
+
+      assert.equal(treasuryBalanceAfter - treasuryBalanceBefore, expectedPlatformFee);
+      assert.equal(evaluatorBalanceAfter - evaluatorBalanceBefore, expectedEvalFee);
+      assert.equal(providerBalanceAfter - providerBalanceBefore, expectedNet);
+    });
+
+    it("total fees > 10000bp reverts with FeesTooHigh", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.setPlatformFee([BigInt(5000), treasuryAddress]);
+
+      await assert.rejects(
+        apexAsDeployer.write.setEvaluatorFee([BigInt(6000)]),
+        /FeesTooHigh/
+      );
+    });
+
+    it("non-admin cannot call setPlatformFee (AccessControlUnauthorizedAccount)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: other },
+      });
+
+      await assert.rejects(
+        apexAsOther.write.setPlatformFee([BigInt(250), treasuryAddress]),
+        /AccessControlUnauthorizedAccount/
+      );
+    });
+  });
+
+  // ============================================================
+  // Pause Tests
+  // ============================================================
+
+  describe("Pause", async () => {
+    it("pause() by admin pauses the contract", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.pause();
+
+      const paused = await apex.read.paused();
+      assert.equal(paused, true);
+    });
+
+    it("createJob reverts when paused (EnforcedPause)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.pause();
+
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      await assert.rejects(
+        apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]),
+        /EnforcedPause/
+      );
+    });
+
+    it("fund reverts when paused", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
+      await apexAsClient.write.setBudget([BigInt(1), DEFAULT_BUDGET, "0x"]);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.pause();
+
+      await token.write.mint([clientAddress, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: client },
+      });
+      await tokenAsClient.write.approve([apex.address, DEFAULT_BUDGET]);
+
+      await assert.rejects(
+        apexAsClient.write.fund([BigInt(1), DEFAULT_BUDGET, "0x"]),
+        /EnforcedPause/
+      );
+    });
+
+    it("claimRefund works when paused (critical safety test)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      // Set up a funded job with a near-future expiry BEFORE pausing
+      const expiredAt = await futureTimestamp(3600);
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET,
+        zeroAddress, expiredAt
+      );
+
+      // Travel past expiry
+      await testClient.setNextBlockTimestamp({ timestamp: expiredAt + BigInt(1) });
+      await testClient.mine({ blocks: 1 });
+
+      // Now pause the contract
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.pause();
+
+      const clientBalanceBefore = await token.read.balanceOf([clientAddress]);
+
+      // claimRefund must still work even while paused
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+      await apexAsClient.write.claimRefund([jobId]);
+
+      const clientBalanceAfter = await token.read.balanceOf([clientAddress]);
+      assert.equal(clientBalanceAfter - clientBalanceBefore, DEFAULT_BUDGET);
+
+      const jobAfter = await apex.read.getJob([jobId]);
+      assert.equal(jobAfter.status, JobStatus.Expired);
+    });
+
+    it("unpause() resumes operations", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+      await apexAsDeployer.write.pause();
+      await apexAsDeployer.write.unpause();
+
+      const paused = await apex.read.paused();
+      assert.equal(paused, false);
+
+      // createJob should work again
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job after unpause", zeroAddress]);
+
+      const job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Open);
+    });
+
+    it("non-admin cannot pause (AccessControlUnauthorizedAccount)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: other },
+      });
+
+      await assert.rejects(
+        apexAsOther.write.pause(),
+        /AccessControlUnauthorizedAccount/
+      );
+    });
+  });
+
+  // ============================================================
+  // HookWhitelist Tests
+  // ============================================================
+
+  describe("HookWhitelist", async () => {
+    it("setHookWhitelist adds hook, emits HookWhitelistUpdated", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: deployer },
+      });
+
+      const fakeHook = otherAddress;
+      const hash = await apexAsDeployer.write.setHookWhitelist([fakeHook, true]);
+      const receipt = await publicClient.getTransactionReceipt({ hash });
+
+      // Verify whitelisted
+      const isWhitelisted = await apex.read.whitelistedHooks([fakeHook]);
+      assert.equal(isWhitelisted, true);
+
+      // Verify event was emitted (at least one log present)
+      assert.ok(receipt.logs.length > 0, "Expected at least one log (HookWhitelistUpdated)");
+    });
+
+    it("address(0) is whitelisted by default (createJob with zeroAddress hook succeeds)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const isWhitelisted = await apex.read.whitelistedHooks([zeroAddress]);
+      assert.equal(isWhitelisted, true);
+
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      // Should not revert
+      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Hook test", zeroAddress]);
+      const job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Open);
+    });
+
+    it("non-whitelisted hook reverts createJob with HookNotWhitelisted", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      // Use a non-whitelisted address as hook
+      const nonWhitelistedHook = otherAddress;
+
+      await assert.rejects(
+        apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Hook test", nonWhitelistedHook]),
+        /HookNotWhitelisted/
+      );
+    });
+
+    it("non-admin cannot call setHookWhitelist (AccessControlUnauthorizedAccount)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: other },
+      });
+
+      await assert.rejects(
+        apexAsOther.write.setHookWhitelist([otherAddress, true]),
+        /AccessControlUnauthorizedAccount/
+      );
+    });
+  });
+
+  // ============================================================
+  // ReputationSignal Tests
+  // ============================================================
+
+  describe("ReputationSignal", async () => {
+    it("complete() emits ReputationSignal(jobId, provider, 'provider', 1)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
+      });
+      await apexAsProvider.write.submit([jobId, keccak256(toHex("deliverable")), "0x"]);
+
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      const hash = await apexAsEvaluator.write.complete([jobId, keccak256(toHex("reason")), "0x"]);
+      const receipt = await publicClient.getTransactionReceipt({ hash });
+
+      const events = await publicClient.getContractEvents({
+        address: apex.address,
+        abi: apex.abi,
+        eventName: "ReputationSignal",
+        fromBlock: receipt.blockNumber,
+        toBlock: receipt.blockNumber,
+      });
+
+      assert.equal(events.length, 1);
+      assert.equal(events[0].args.jobId, jobId);
+      assert.equal(getAddress(events[0].args.subject!), providerAddress);
+      assert.equal(events[0].args.role, "provider");
+      assert.equal(events[0].args.signal, 1);
+    });
+
+    it("reject() from Funded emits ReputationSignal(jobId, provider, 'provider', -1)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const jobId = await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
+
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
+      });
+      const hash = await apexAsEvaluator.write.reject([jobId, keccak256(toHex("reason")), "0x"]);
+      const receipt = await publicClient.getTransactionReceipt({ hash });
+
+      const events = await publicClient.getContractEvents({
+        address: apex.address,
+        abi: apex.abi,
+        eventName: "ReputationSignal",
+        fromBlock: receipt.blockNumber,
+        toBlock: receipt.blockNumber,
+      });
+
+      assert.equal(events.length, 1);
+      assert.equal(events[0].args.jobId, jobId);
+      assert.equal(getAddress(events[0].args.subject!), providerAddress);
+      assert.equal(events[0].args.role, "provider");
+      assert.equal(events[0].args.signal, -1);
+    });
+
+    it("claimRefund() emits ReputationSignal(jobId, provider, 'provider', 0)", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const expiredAt = await futureTimestamp(3600);
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET,
+        zeroAddress, expiredAt
+      );
+
+      await testClient.setNextBlockTimestamp({ timestamp: expiredAt + BigInt(1) });
+      await testClient.mine({ blocks: 1 });
+
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+      const hash = await apexAsClient.write.claimRefund([jobId]);
+      const receipt = await publicClient.getTransactionReceipt({ hash });
+
+      const events = await publicClient.getContractEvents({
+        address: apex.address,
+        abi: apex.abi,
+        eventName: "ReputationSignal",
+        fromBlock: receipt.blockNumber,
+        toBlock: receipt.blockNumber,
+      });
+
+      assert.equal(events.length, 1);
+      assert.equal(events[0].args.jobId, jobId);
+      assert.equal(getAddress(events[0].args.subject!), providerAddress);
+      assert.equal(events[0].args.role, "provider");
+      assert.equal(events[0].args.signal, 0);
+    });
+
+    it("reject() from Open does NOT emit ReputationSignal", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const expiredAt = await futureTimestamp(3600);
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+
+      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
+
+      const hash = await apexAsClient.write.reject([BigInt(1), keccak256(toHex("reason")), "0x"]);
+      const receipt = await publicClient.getTransactionReceipt({ hash });
+
+      const events = await publicClient.getContractEvents({
+        address: apex.address,
+        abi: apex.abi,
+        eventName: "ReputationSignal",
+        fromBlock: receipt.blockNumber,
+        toBlock: receipt.blockNumber,
+      });
+
+      assert.equal(events.length, 0, "Expected no ReputationSignal for Open job rejection");
+    });
+  });
+
+  // ============================================================
+  // Full Lifecycle Test
+  // ============================================================
+
+  describe("Full lifecycle", async () => {
+    it("should complete Open -> Funded -> Submitted -> Completed lifecycle", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const expiredAt = await futureTimestamp(86400);
       const budget = DEFAULT_BUDGET;
 
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: client } });
-      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
+      // Step 1: Create job (Open)
+      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: client },
+      });
+      await apexAsClient.write.createJob([
+        providerAddress, evaluatorAddress, expiredAt, "Full lifecycle job", zeroAddress,
+      ]);
+
+      let job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Open);
+
+      // Step 2: Set budget
       await apexAsClient.write.setBudget([BigInt(1), budget, "0x"]);
 
-      await mintTokens(token, clientAddress, budget);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, { client: { wallet: client } });
+      // Step 3: Fund job (Open -> Funded)
+      await token.write.mint([clientAddress, budget]);
+      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: client },
+      });
       await tokenAsClient.write.approve([apex.address, budget]);
       await apexAsClient.write.fund([BigInt(1), budget, "0x"]);
 
-      await assert.rejects(
-        apexAsClient.write.claimRefund([BigInt(1)]),
-        /NotExpired/
-      );
-    });
+      job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Funded);
 
-    it("should revert if job is Open (not refundable)", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-      const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, { client: { wallet: client } });
-      await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Job", zeroAddress]);
-
-      await assert.rejects(
-        apexAsClient.write.claimRefund([BigInt(1)]),
-        /NotRefundable/
-      );
-    });
-  });
-
-  // ============================================================
-  // Admin Functions Tests
-  // ============================================================
-
-  describe("Admin Functions", async () => {
-    it("should allow owner to set min budget", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: deployer },
+      // Step 4: Provider submits (Funded -> Submitted)
+      const apexAsProvider = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: provider },
       });
+      const deliverable = keccak256(toHex("the work product"));
+      await apexAsProvider.write.submit([BigInt(1), deliverable, "0x"]);
 
-      await apexAsDeployer.write.setMinBudget([BigInt(5000000)]);
-      const newMinBudget = await apex.read.minBudget();
-      assert.equal(newMinBudget, BigInt(5000000));
-    });
+      job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Submitted);
 
-    it("should revert if non-owner tries to set min budget", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      // Step 5: Evaluator completes (Submitted -> Completed)
+      const providerBalanceBefore = await token.read.balanceOf([providerAddress]);
 
-      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: other },
+      const apexAsEvaluator = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
+        client: { wallet: evaluator },
       });
+      await apexAsEvaluator.write.complete([BigInt(1), keccak256(toHex("approved")), "0x"]);
 
-      await assert.rejects(
-        apexAsOther.write.setMinBudget([BigInt(5000000)]),
-        /OwnableUnauthorizedAccount/
-      );
-    });
+      job = await apex.read.getJob([BigInt(1)]);
+      assert.equal(job.status, JobStatus.Completed);
 
-    it("should allow owner to set payment token when no escrows exist", async () => {
-      const token = await deployMockToken(viem);
-      const token2 = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: deployer },
-      });
-
-      await apexAsDeployer.write.setPaymentToken([token2.address]);
-      const newToken = await apex.read.paymentToken();
-      assert.equal(getAddress(newToken), getAddress(token2.address));
-    });
-
-    it("should revert setPaymentToken when active escrows exist", async () => {
-      const token = await deployMockToken(viem);
-      const token2 = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
-
-      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: deployer },
-      });
-
-      await assert.rejects(
-        apexAsDeployer.write.setPaymentToken([token2.address]),
-        /ActiveEscrowsExist/
-      );
-    });
-
-    it("should revert setPaymentToken with zero address", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: deployer },
-      });
-
-      await assert.rejects(
-        apexAsDeployer.write.setPaymentToken([zeroAddress]),
-        /invalid token/
-      );
-    });
-
-    it("should allow owner to rescue non-payment tokens", async () => {
-      const token = await deployMockToken(viem);
-      const otherToken = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      // Send some other tokens to the contract
-      await otherToken.write.mint([apex.address, BigInt(1000)]);
-
-      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: deployer },
-      });
-
-      await apexAsDeployer.write.rescueBEP20([otherToken.address, deployerAddress, BigInt(1000)]);
-
-      const balance = await otherToken.read.balanceOf([deployerAddress]);
-      assert.equal(balance, BigInt(1000));
-    });
-
-    it("should revert rescue of payment token if amount exceeds excess", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      await createAndFundJob(viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET);
-
-      const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: deployer },
-      });
-
-      await assert.rejects(
-        apexAsDeployer.write.rescueBEP20([token.address, deployerAddress, DEFAULT_BUDGET]),
-        /RescueExceedsExcess/
-      );
-    });
-
-    it("should revert if non-owner tries to upgrade", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable");
-
-      const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
-        client: { wallet: other },
-      });
-
-      await assert.rejects(
-        apexAsOther.write.upgradeToAndCall([newImpl.address, "0x"]),
-        /OwnableUnauthorizedAccount/
-      );
-    });
-  });
-
-  // ============================================================
-  // View Function Tests
-  // ============================================================
-
-  describe("View Functions", async () => {
-    it("getJob should revert for non-existent job", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      await assert.rejects(
-        apex.read.getJob([BigInt(999)]),
-        /JobNotFound/
-      );
-    });
-
-    it("getJobStatus should return None for non-existent job", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const status = await apex.read.getJobStatus([BigInt(999)]);
-      assert.equal(status, Status.None);
-    });
-
-    it("pendingWithdrawals should return 0 for new address", async () => {
-      const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
-
-      const pending = await apex.read.pendingWithdrawals([otherAddress]);
-      assert.equal(pending, BigInt(0));
+      // Verify provider received payment
+      const providerBalanceAfter = await token.read.balanceOf([providerAddress]);
+      assert.equal(providerBalanceAfter - providerBalanceBefore, budget);
     });
   });
 });

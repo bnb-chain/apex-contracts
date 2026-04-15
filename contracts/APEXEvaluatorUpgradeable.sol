@@ -7,7 +7,8 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "./IERC8183Hook.sol";
+import "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import "./IACPHook.sol";
 import "./IAPEXEvaluator.sol";
 
 /**
@@ -15,8 +16,7 @@ import "./IAPEXEvaluator.sol";
  * @notice Interface for the AgenticCommerceUpgradeable contract
  */
 interface IAgenticCommerce {
-    enum Status {
-        None,
+    enum JobStatus {
         Open,
         Funded,
         Submitted,
@@ -26,21 +26,21 @@ interface IAgenticCommerce {
     }
 
     struct Job {
+        uint256 id;
         address client;
         address provider;
         address evaluator;
-        address hook;
+        string description;
         uint256 budget;
         uint256 expiredAt;
-        Status status;
-        bytes32 deliverable;
-        string description;
+        JobStatus status;
+        address hook;
     }
 
     function getJob(uint256 jobId) external view returns (Job memory);
     function complete(uint256 jobId, bytes32 reason, bytes calldata optParams) external;
     function reject(uint256 jobId, bytes32 reason, bytes calldata optParams) external;
-    function paymentToken() external view returns (address);
+    function paymentToken() external view returns (IERC20);
 }
 
 /**
@@ -104,7 +104,7 @@ interface IOptimisticOracleV3 {
  * Key Features:
  *   - UUPS upgradeable with stable proxy address
  *   - ERC-7201 namespaced storage for safe upgrades
- *   - Implements IERC8183Hook: afterAction auto-triggers assertion on submit
+ *   - Implements IACPHook: afterAction auto-triggers assertion on submit
  *   - Pre-funded bond model: anyone can deposit, contract pays bond
  *   - Disputed state tracking
  *   - Query functions for UI integration
@@ -116,7 +116,7 @@ interface IOptimisticOracleV3 {
  *   4. After liveness, anyone calls settleJob() → complete/reject
  */
 contract APEXEvaluatorUpgradeable is
-    IERC8183Hook,
+    IACPHook,
     IAPEXEvaluator,
     OwnableUpgradeable,
     ReentrancyGuardUpgradeable,
@@ -134,17 +134,26 @@ contract APEXEvaluatorUpgradeable is
     bytes4 private constant SUBMIT_SELECTOR =
         bytes4(keccak256("submit(uint256,bytes32,bytes)"));
 
+    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
+        return interfaceId == type(IACPHook).interfaceId
+            || interfaceId == type(IERC165).interfaceId;
+    }
+
     // ============================================================
     //  Storage (ERC-7201 Namespaced)
     // ============================================================
 
-    /// @custom:storage-location erc7201:apexevaluator.storage
+    /// @dev Storage location for evaluator state.
+    ///      WARNING: The EVALUATOR_STORAGE_LOCATION constant below was set at initial
+    ///      deployment and does NOT match the standard ERC-7201 derivation for the
+    ///      namespace "apexevaluator.storage". Do NOT recalculate using the ERC-7201
+    ///      formula — doing so would point to a different slot and brick the proxy.
     struct EvaluatorStorage {
         IAgenticCommerce erc8183;
         IOptimisticOracleV3 oov3;
         IERC20 bondToken;
         uint64 liveness;
-        uint256 bondBalance;
+        uint256 bondBalance;                         // Deprecated in v5
         mapping(bytes32 => uint256) assertionToJob;
         mapping(uint256 => bytes32) jobToAssertion;
         mapping(uint256 => bool) jobAssertionInitiated;
@@ -153,15 +162,26 @@ contract APEXEvaluatorUpgradeable is
         mapping(bytes32 => bool) assertionExists;  // Fix jobId=0 edge case
         mapping(uint256 => uint256) jobBondAmount;  // Cached bond per job (M04)
         uint256 pendingAssertions;                   // Active assertion counter (M05)
+        mapping(uint256 => bytes32) jobDeliverable;
+        mapping(uint256 => address) jobAsserter;     // Who paid the bond (v5)
+        uint256 totalLockedBond;                     // Sum of all in-flight bonds (v5)
     }
 
     /// @notice Contract version for upgrade tracking
     /// @dev v2: Fixed IOptimisticOracleV3.Assertion struct to match actual OOv3 return type
     /// @dev v3: Audit remediation — M01 try-catch, M03 dispute-win bond recovery,
     ///          M04 per-job bond caching, M05 pendingAssertions guard, I01/I05
-    uint256 public constant VERSION = 3;
+    /// @dev v4: Issue #13 — restrict initiateAssertion() to job participants + owner
+    /// @dev v5: Agent-paid bond — provider calls initiateAssertion() and pays bond directly
+    ///          via transferFrom; evaluator bond pool deprecated
+    /// @dev v6: Audit remediation v2 — R1-M01 JobExpiryTooSoon time check,
+    ///          R2-M01 storage annotation fix, R2-I01 TokensRescued event,
+    ///          R2-I03 setBondToken OOv3 whitelist validation
+    uint256 public constant VERSION = 6;
 
-    // keccak256(abi.encode(uint256(keccak256("apexevaluator.storage")) - 1)) & ~bytes32(uint256(0xff))
+    // WARNING (R2-M01): This value does NOT equal the standard ERC-7201 derivation
+    // of "apexevaluator.storage". It is the initial deployment value used by all
+    // deployed proxies and MUST NOT be recalculated or changed.
     bytes32 private constant EVALUATOR_STORAGE_LOCATION =
         0xa3b1f9c8d2e4f0a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f800;
 
@@ -177,12 +197,13 @@ contract APEXEvaluatorUpgradeable is
 
     // Events inherited from IAPEXEvaluator: AssertionInitiated, AssertionResolved,
     // AssertionDisputed, BondDeposited, BondWithdrawn
-    event BondReturned(bytes32 indexed assertionId, uint256 amount);
+    event BondReturned(bytes32 indexed assertionId, uint256 amount); // Deprecated in v5
     event LivenessUpdated(uint64 oldLiveness, uint64 newLiveness);
     event ERC8183Updated(address indexed oldErc8183, address indexed newErc8183);
     event OOv3Updated(address indexed oldOov3, address indexed newOov3);
     event BondTokenUpdated(address indexed oldToken, address indexed newToken);
     event BondBalanceSynced(uint256 oldBalance, uint256 newBalance);
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
 
     // ============================================================
     //  Errors
@@ -196,6 +217,8 @@ contract APEXEvaluatorUpgradeable is
     error OnlyERC8183();
     error NoAssertionForJob(uint256 jobId);
     error PendingAssertionsExist(uint256 count);
+    error CallerNotAllowed(address caller);
+    error JobExpiryTooSoon(uint256 jobId, uint256 expiredAt, uint256 minRequired);
 
     // ============================================================
     //  Constructor (disabled for proxy)
@@ -300,8 +323,16 @@ contract APEXEvaluatorUpgradeable is
         return _getEvaluatorStorage().pendingAssertions;
     }
 
+    function jobAsserter(uint256 jobId) external view returns (address) {
+        return _getEvaluatorStorage().jobAsserter[jobId];
+    }
+
+    function totalLockedBond() external view returns (uint256) {
+        return _getEvaluatorStorage().totalLockedBond;
+    }
+
     // ============================================================
-    //  IERC8183Hook Implementation
+    //  IACPHook Implementation
     // ============================================================
 
     function beforeAction(
@@ -322,61 +353,58 @@ contract APEXEvaluatorUpgradeable is
         if (msg.sender != address($.erc8183)) revert OnlyERC8183();
 
         if (selector == SUBMIT_SELECTOR) {
-            _tryStoreDataUrl(jobId, data);
-            _initiateAssertionInternal(jobId);
+            // data = abi.encode(bytes32 deliverable, bytes optParams)
+            (bytes32 deliverable, bytes memory optParams) = abi.decode(data, (bytes32, bytes));
+            $.jobDeliverable[jobId] = deliverable;
+
+            // Store sanitized dataUrl from optParams
+            if (optParams.length > 0 && optParams.length <= 256) {
+                $.jobDataUrl[jobId] = _sanitizeDataUrl(string(optParams));
+            }
+
+            // Assertion is NOT auto-initiated here (v5).
+            // Provider must call initiateAssertion() separately and pay the bond.
         }
     }
 
-    function _tryStoreDataUrl(uint256 jobId, bytes calldata data) internal {
-        if (data.length < 96) return;
-
-        uint256 offset;
-        assembly {
-            offset := calldataload(add(data.offset, 32))
+    function _sanitizeDataUrl(string memory url) internal pure returns (string memory) {
+        bytes memory b = bytes(url);
+        for (uint256 i = 0; i < b.length; i++) {
+            if (b[i] == "[" || b[i] == "]") {
+                b[i] = "_";
+            }
         }
-        if (offset != 64) return;
-
-        uint256 len;
-        assembly {
-            len := calldataload(add(data.offset, 64))
-        }
-        if (len == 0 || len > 256) return;
-
-        if (data.length < 96 + len) return;
-
-        // Extract optParams using calldatacopy (handles >32 bytes correctly)
-        bytes memory optParams = new bytes(len);
-        assembly {
-            calldatacopy(add(optParams, 32), add(data.offset, 96), len)
-        }
-        _getEvaluatorStorage().jobDataUrl[jobId] = string(optParams);
+        return string(b);
     }
 
     // ============================================================
     //  Bond Management
     // ============================================================
 
-    function depositBond(uint256 amount) external {
-        require(amount > 0, "amount must be > 0");
-        EvaluatorStorage storage $ = _getEvaluatorStorage();
-        $.bondToken.safeTransferFrom(msg.sender, address(this), amount);
-        $.bondBalance += amount;
-        emit BondDeposited(msg.sender, amount);
+    function depositBond(uint256) external pure {
+        revert("deprecated: agent pays bond directly via initiateAssertion");
     }
 
-    function withdrawBond(uint256 amount) external onlyOwner {
-        EvaluatorStorage storage $ = _getEvaluatorStorage();
-        require($.bondBalance >= amount, "insufficient balance");
-        $.bondBalance -= amount;
-        $.bondToken.safeTransfer(msg.sender, amount);
-        emit BondWithdrawn(msg.sender, amount);
+    function withdrawBond(uint256) external pure {
+        revert("deprecated: agent pays bond directly via initiateAssertion");
     }
 
     // ============================================================
     //  Assertion Functions
     // ============================================================
 
+    /**
+     * @notice Initiate a UMA assertion for a submitted job.
+     * @dev Caller must be the job provider. Caller must approve bondToken to this
+     *      contract for at least getMinimumBond() before calling.
+     * @param jobId The job ID in AgenticCommerce
+     */
     function initiateAssertion(uint256 jobId) external nonReentrant whenNotPaused {
+        EvaluatorStorage storage $ = _getEvaluatorStorage();
+        IAgenticCommerce.Job memory job = $.erc8183.getJob(jobId);
+        if (msg.sender != job.provider) {
+            revert CallerNotAllowed(msg.sender);
+        }
         _initiateAssertionInternal(jobId);
     }
 
@@ -403,24 +431,34 @@ contract APEXEvaluatorUpgradeable is
         uint256 jobId = $.assertionToJob[assertionId];
 
         // Decrement pending assertions counter (M05)
-        if ($.pendingAssertions > 0) {
-            $.pendingAssertions--;
-        }
+        $.pendingAssertions--;
 
         // Bond accounting: use cached bond amount to avoid desync (M04)
         uint256 cachedBond = $.jobBondAmount[jobId];
+        address asserter = $.jobAsserter[jobId];
+
+        // Decrement locked bond tracker
+        if ($.totalLockedBond >= cachedBond) {
+            $.totalLockedBond -= cachedBond;
+        }
 
         if (!$.jobDisputed[jobId]) {
             // Bond returned by OOv3 on successful resolution (no dispute)
-            $.bondBalance += cachedBond;
-            emit BondReturned(assertionId, cachedBond);
+            // Forward back to the agent who paid it
+            if (asserter != address(0) && cachedBond > 0) {
+                $.bondToken.safeTransfer(asserter, cachedBond);
+                emit BondTransferredToAsserter(jobId, asserter, cachedBond);
+            }
         } else if (assertedTruthfully) {
-            // Dispute resolved in asserter's favor — UMA returns 2*bond - oracleFee (M03)
-            uint256 actualBalance = $.bondToken.balanceOf(address(this));
-            if (actualBalance > $.bondBalance) {
-                uint256 received = actualBalance - $.bondBalance;
-                $.bondBalance += received;
-                emit BondReturned(assertionId, received);
+            // Dispute resolved in asserter's favor — OOv3 returns 2*bond - oracleFee (M03)
+            // Forward any received tokens (beyond remaining locked) to the asserter
+            if (asserter != address(0)) {
+                uint256 actualBalance = $.bondToken.balanceOf(address(this));
+                if (actualBalance > $.totalLockedBond) {
+                    uint256 received = actualBalance - $.totalLockedBond;
+                    $.bondToken.safeTransfer(asserter, received);
+                    emit BondTransferredToAsserter(jobId, asserter, received);
+                }
             }
         }
         // If disputed and assertedTruthfully == false, bond is lost to disputer
@@ -558,13 +596,14 @@ contract APEXEvaluatorUpgradeable is
         EvaluatorStorage storage $ = _getEvaluatorStorage();
 
         if (token == address($.bondToken)) {
-            // Only allow rescuing excess tokens beyond tracked bondBalance
+            // Only allow rescuing excess tokens beyond locked bond amounts
             uint256 actualBalance = $.bondToken.balanceOf(address(this));
-            uint256 excess = actualBalance > $.bondBalance ? actualBalance - $.bondBalance : 0;
+            uint256 excess = actualBalance > $.totalLockedBond ? actualBalance - $.totalLockedBond : 0;
             require(amount <= excess, "cannot rescue reserved bond");
         }
 
         IERC20(token).safeTransfer(to, amount);
+        emit TokensRescued(token, to, amount);
     }
 
     /**
@@ -602,22 +641,19 @@ contract APEXEvaluatorUpgradeable is
     function setBondToken(address newBondToken) external onlyOwner {
         require(newBondToken != address(0), "invalid bond token");
         EvaluatorStorage storage $ = _getEvaluatorStorage();
-        require($.bondBalance == 0, "withdraw bond first");
+        require($.totalLockedBond == 0, "cannot change bond token with active assertions");
+        // R2-I03: Verify new token is whitelisted by OOv3
+        require($.oov3.getMinimumBond(newBondToken) > 0, "token not whitelisted by OOv3");
         address oldToken = address($.bondToken);
         $.bondToken = IERC20(newBondToken);
         emit BondTokenUpdated(oldToken, newBondToken);
     }
 
     /**
-     * @notice Sync bondBalance with actual token balance
-     * @dev Use when bondBalance gets out of sync (e.g., direct transfers)
+     * @notice Deprecated in v5. Bond pool is no longer used.
      */
-    function syncBondBalance() external onlyOwner {
-        EvaluatorStorage storage $ = _getEvaluatorStorage();
-        uint256 oldBalance = $.bondBalance;
-        uint256 actualBalance = $.bondToken.balanceOf(address(this));
-        $.bondBalance = actualBalance;
-        emit BondBalanceSynced(oldBalance, actualBalance);
+    function syncBondBalance() external pure {
+        revert("deprecated: bond pool removed in v5");
     }
 
     // ============================================================
@@ -628,10 +664,8 @@ contract APEXEvaluatorUpgradeable is
         EvaluatorStorage storage $ = _getEvaluatorStorage();
         IAgenticCommerce.Job memory job = $.erc8183.getJob(jobId);
 
-        if (msg.sender != address($.erc8183)) {
-            if (job.status != IAgenticCommerce.Status.Submitted) {
-                revert JobNotSubmitted(jobId);
-            }
+        if (job.status != IAgenticCommerce.JobStatus.Submitted) {
+            revert JobNotSubmitted(jobId);
         }
         if (job.evaluator != address(this)) {
             revert NotEvaluatorForJob(jobId);
@@ -640,12 +674,17 @@ contract APEXEvaluatorUpgradeable is
             revert AssertionAlreadyInitiated(jobId);
         }
 
+        // R1-M01: Prevent initiating assertions that can't settle before job expires
+        if (job.expiredAt <= block.timestamp + $.liveness) {
+            revert JobExpiryTooSoon(jobId, job.expiredAt, block.timestamp + $.liveness);
+        }
+
         uint256 bond = $.oov3.getMinimumBond(address($.bondToken));
 
-        if ($.bondBalance < bond) {
-            revert InsufficientBondBalance(bond, $.bondBalance);
-        }
-        $.bondBalance -= bond;
+        // Pull bond from the caller (provider) — caller must have pre-approved
+        $.bondToken.safeTransferFrom(msg.sender, address(this), bond);
+        $.jobAsserter[jobId] = msg.sender;
+        $.totalLockedBond += bond;
 
         $.bondToken.forceApprove(address($.oov3), bond);
 
@@ -679,8 +718,8 @@ contract APEXEvaluatorUpgradeable is
      */
     function _getPaymentToken() internal view returns (address) {
         EvaluatorStorage storage $ = _getEvaluatorStorage();
-        try $.erc8183.paymentToken() returns (address token) {
-            return token;
+        try $.erc8183.paymentToken() returns (IERC20 token) {
+            return address(token);
         } catch {
             return address(0);
         }
@@ -744,14 +783,14 @@ contract APEXEvaluatorUpgradeable is
         );
     }
 
-    function _buildClaimResponse(uint256 jobId, IAgenticCommerce.Job memory job) internal view returns (bytes memory) {
+    function _buildClaimResponse(uint256 jobId, IAgenticCommerce.Job memory /* job */) internal view returns (bytes memory) {
         EvaluatorStorage storage $ = _getEvaluatorStorage();
         string memory dataUrl = $.jobDataUrl[jobId];
         bool hasDataUrl = bytes(dataUrl).length > 0;
 
         return abi.encodePacked(
             ". [RESPONSE] ",
-            "Deliverable Hash: ", _bytes32ToHex(job.deliverable),
+            "Deliverable Hash: ", _bytes32ToHex(_getEvaluatorStorage().jobDeliverable[jobId]),
             hasDataUrl ? ". Deliverable URL: " : "",
             hasDataUrl ? dataUrl : "",
             ". [VERIFY] ",

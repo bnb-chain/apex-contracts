@@ -3,9 +3,7 @@
  * Usage: NEW_PAYMENT_TOKEN=0x... npx hardhat run scripts/admin/set-payment-token.ts --network bscTestnet
  */
 import hre from "hardhat";
-import dotenv from "dotenv";
-
-dotenv.config();
+// dotenv is loaded in hardhat.config.ts with DOTENV_CONFIG_PATH support
 
 const PROXY_ADDRESS =
   (process.env.ERC8183_ADDRESS || "0x8b121FEf5e1688B976D814003f05d9366F3Fa8A3") as `0x${string}`;

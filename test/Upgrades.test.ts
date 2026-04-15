@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
 import { encodeFunctionData, getAddress, keccak256, toHex, zeroAddress } from "viem";
-import { Status, MIN_BUDGET, DEFAULT_BUDGET, DEFAULT_LIVENESS, DEFAULT_BOND } from "./constants.js";
+import { JobStatus, DEFAULT_BUDGET, DEFAULT_LIVENESS, DEFAULT_BOND, TRUSTED_FORWARDER } from "./constants.js";
 import {
   deployMockToken,
   mintTokens,
@@ -30,7 +30,7 @@ describe("UUPS Upgrade Tests", async function () {
   describe("AgenticCommerce Upgrade", async () => {
     it("should upgrade and preserve state", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
 
       // Create some state
       const expiredAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
@@ -40,12 +40,11 @@ describe("UUPS Upgrade Tests", async function () {
       await apexAsClient.write.createJob([providerAddress, evaluatorAddress, expiredAt, "Upgrade test job", zeroAddress]);
 
       // Record state before upgrade
-      const nextJobIdBefore = await apex.read.nextJobId();
-      const minBudgetBefore = await apex.read.minBudget();
+      const jobCounterBefore = await apex.read.jobCounter();
       const paymentTokenBefore = await apex.read.paymentToken();
 
       // Deploy new implementation
-      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable");
+      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable", [TRUSTED_FORWARDER]);
 
       // Upgrade
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -54,24 +53,22 @@ describe("UUPS Upgrade Tests", async function () {
       await apexAsDeployer.write.upgradeToAndCall([newImpl.address, "0x"]);
 
       // Verify state preserved
-      const nextJobIdAfter = await apex.read.nextJobId();
-      const minBudgetAfter = await apex.read.minBudget();
+      const jobCounterAfter = await apex.read.jobCounter();
       const paymentTokenAfter = await apex.read.paymentToken();
 
-      assert.equal(nextJobIdAfter, nextJobIdBefore);
-      assert.equal(minBudgetAfter, minBudgetBefore);
+      assert.equal(jobCounterAfter, jobCounterBefore);
       assert.equal(getAddress(paymentTokenAfter), getAddress(paymentTokenBefore));
 
       // Verify job data preserved
       const job = await apex.read.getJob([BigInt(1)]);
       assert.equal(getAddress(job.client), clientAddress);
       assert.equal(job.description, "Upgrade test job");
-      assert.equal(job.status, Status.Open);
+      assert.equal(job.status, JobStatus.Open);
     });
 
     it("should continue working after upgrade", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
 
       // Create and fund a job
       const jobId = await createAndFundJob(
@@ -79,7 +76,7 @@ describe("UUPS Upgrade Tests", async function () {
       );
 
       // Upgrade
-      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable");
+      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable", [TRUSTED_FORWARDER]);
       const apexAsDeployer = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: deployer },
       });
@@ -98,7 +95,7 @@ describe("UUPS Upgrade Tests", async function () {
       await apexAsEvaluator.write.complete([jobId, keccak256(toHex("ok")), "0x"]);
 
       const job = await apex.read.getJob([jobId]);
-      assert.equal(job.status, Status.Completed);
+      assert.equal(job.status, JobStatus.Completed);
 
       // Provider should have received payment
       const balance = await token.read.balanceOf([providerAddress]);
@@ -107,9 +104,11 @@ describe("UUPS Upgrade Tests", async function () {
 
     it("should revert upgrade from non-owner", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
 
-      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable");
+      const newImpl = await viem.deployContract("AgenticCommerceUpgradeable", [
+        "0x0000000000000000000000000000000000000001"
+      ]);
 
       const apexAsOther = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
         client: { wallet: other },
@@ -117,7 +116,7 @@ describe("UUPS Upgrade Tests", async function () {
 
       await assert.rejects(
         apexAsOther.write.upgradeToAndCall([newImpl.address, "0x"]),
-        /OwnableUnauthorizedAccount/
+        /AccessControlUnauthorizedAccount/
       );
     });
   });
@@ -129,43 +128,39 @@ describe("UUPS Upgrade Tests", async function () {
   describe("APEXEvaluator Upgrade", async () => {
     it("should upgrade evaluator and preserve state", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
       const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
 
       const evaluatorProxy = await deployEvaluatorProxy(
         viem, deployerAddress, apex.address, oov3.address, token.address, DEFAULT_LIVENESS
       );
 
-      // Deposit some bond
-      await token.write.mint([deployerAddress, DEFAULT_BOND * BigInt(3)]);
-      const tokenAsDeployer = await viem.getContractAt("MockERC20", token.address, {
-        client: { wallet: deployer },
-      });
-      await tokenAsDeployer.write.approve([evaluatorProxy.address, DEFAULT_BOND * BigInt(3)]);
       const evalAsDeployer = await viem.getContractAt("APEXEvaluatorUpgradeable", evaluatorProxy.address, {
         client: { wallet: deployer },
       });
-      await evalAsDeployer.write.depositBond([DEFAULT_BOND * BigInt(2)]);
 
-      // Record state
-      const bondBalBefore = await evaluatorProxy.read.bondBalance();
+      // Record state before upgrade
       const livenessBefore = await evaluatorProxy.read.liveness();
+      const erc8183Before = await evaluatorProxy.read.erc8183();
+      const totalLockedBefore = await evaluatorProxy.read.totalLockedBond();
 
       // Deploy new impl and upgrade
       const newImpl = await viem.deployContract("APEXEvaluatorUpgradeable");
       await evalAsDeployer.write.upgradeToAndCall([newImpl.address, "0x"]);
 
-      // Verify preserved
-      const bondBalAfter = await evaluatorProxy.read.bondBalance();
+      // Verify state preserved
       const livenessAfter = await evaluatorProxy.read.liveness();
+      const erc8183After = await evaluatorProxy.read.erc8183();
+      const totalLockedAfter = await evaluatorProxy.read.totalLockedBond();
 
-      assert.equal(bondBalAfter, bondBalBefore);
       assert.equal(livenessAfter, livenessBefore);
+      assert.equal(getAddress(erc8183After as string), getAddress(erc8183Before as string));
+      assert.equal(totalLockedAfter, totalLockedBefore);
     });
 
     it("should revert evaluator upgrade from non-owner", async () => {
       const token = await deployMockToken(viem);
-      const apex = await deployAPEXProxy(viem, token.address, deployerAddress);
+      const apex = await deployAPEXProxy(viem, token.address, deployerAddress, deployerAddress);
       const oov3 = await deployMockOOv3(viem, DEFAULT_BOND);
 
       const evaluatorProxy = await deployEvaluatorProxy(
