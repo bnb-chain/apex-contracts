@@ -48,3 +48,6 @@ _tmp/
 
 # Test deployment
 deployments/bscTestnet-test.json
+
+.env.*
+!.env.example

@@ -6,9 +6,7 @@ import {
   keccak256,
   getCreate2Address,
 } from "viem";
-import dotenv from "dotenv";
-
-dotenv.config();
+// dotenv is loaded in hardhat.config.ts with DOTENV_CONFIG_PATH support
 
 const SAFE_SINGLETON_FACTORY =
   "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7" as const;

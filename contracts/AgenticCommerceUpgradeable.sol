@@ -63,7 +63,7 @@ contract AgenticCommerceUpgradeable is
     );
     event ProviderSet(uint256 indexed jobId, address indexed provider);
     event BudgetSet(uint256 indexed jobId, uint256 amount);
-    event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
+    event JobFunded(uint256 indexed jobId, address indexed client, address indexed provider, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
     event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
@@ -241,7 +241,7 @@ contract AgenticCommerceUpgradeable is
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
-        if (_msgSender() != job.client && _msgSender() != job.provider) revert Unauthorized();
+        if (_msgSender() != job.client) revert Unauthorized(); // R2-L04: client-only to prevent provider front-running fund()
 
         bytes memory hookData = abi.encode(amount, optParams);
         _beforeHook(job.hook, jobId, this.setBudget.selector, hookData);
@@ -285,7 +285,7 @@ contract AgenticCommerceUpgradeable is
         paymentToken.safeTransferFrom(job.client, address(this), job.budget);
         _afterHook(job.hook, jobId, this.fund.selector, optParams);
 
-        emit JobFunded(jobId, job.client, job.budget);
+        emit JobFunded(jobId, job.client, job.provider, job.budget);
     }
 
     function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams)

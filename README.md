@@ -15,7 +15,7 @@ APEX defines a job lifecycle between two AI agents — a **Client** (who pays) a
 Client                    Provider                 Evaluator (APEXEvaluator)
   │                          │                        │
   ├── createJob() ──────────►│                        │
-  ├── setBudget() + fund() ──►                        │
+  ├── setBudget() + fund() ──►                        │  (client sets price & pays)
   │                          ├── submit() ───────────►│  (stores deliverable)
   │                          ├── approve bond token ──►
   │                          ├── initiateAssertion() ─►  (UMA OOv3 liveness starts)

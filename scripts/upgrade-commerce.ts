@@ -5,9 +5,7 @@ import {
   keccak256,
   getCreate2Address,
 } from "viem";
-import dotenv from "dotenv";
-
-dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || ".env", override: false });
+// dotenv is loaded in hardhat.config.ts with DOTENV_CONFIG_PATH support
 
 const SAFE_SINGLETON_FACTORY =
   "0x914d7Fec6aaC8cd542e72Bca78B30650d45643d7" as const;
@@ -19,9 +17,10 @@ const TRUSTED_FORWARDER =
 const PROXY_ADDRESS =
   (process.env.ERC8183_ADDRESS || "") as `0x${string}`;
 
-/** Salt for new implementation (CREATE2) - increment per upgrade */
-const NEW_IMPL_SALT =
-  "0x000000000000000000000000000000000000000000000000000000000000818d" as Hex;
+/** Fixed salt for implementation deployment (CREATE2).
+ *  No need to increment — different bytecode produces different addresses automatically. */
+const IMPL_SALT =
+  "0x0000000000000000000000000000000000000000000000000000000000008100" as Hex;
 
 const IMPL_SLOT = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
@@ -116,7 +115,7 @@ async function main() {
 
   const newImplAddress = getCreate2Address({
     from: SAFE_SINGLETON_FACTORY,
-    salt: NEW_IMPL_SALT,
+    salt: IMPL_SALT,
     bytecodeHash: keccak256(implBytecode),
   });
 
@@ -125,7 +124,7 @@ async function main() {
   if (!(await codeAt(newImplAddress))) {
     const txHash = await deployer.sendTransaction({
       to: SAFE_SINGLETON_FACTORY,
-      data: (NEW_IMPL_SALT + implBytecode.slice(2)) as Hex,
+      data: (IMPL_SALT + implBytecode.slice(2)) as Hex,
     });
     await publicClient.waitForTransactionReceipt({ hash: txHash });
     console.log("   Deployed. Tx:", txHash);

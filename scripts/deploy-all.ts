@@ -23,16 +23,13 @@ import {
   keccak256,
   getCreate2Address,
 } from "viem";
-import dotenv from "dotenv";
+// dotenv is loaded in hardhat.config.ts with DOTENV_CONFIG_PATH support
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-// Load env from DOTENV_CONFIG_PATH (set before hardhat starts) or .env.test fallback
-dotenv.config({ path: process.env.DOTENV_CONFIG_PATH || ".env.test", override: false });
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 

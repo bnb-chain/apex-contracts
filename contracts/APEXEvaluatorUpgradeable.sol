@@ -143,7 +143,11 @@ contract APEXEvaluatorUpgradeable is
     //  Storage (ERC-7201 Namespaced)
     // ============================================================
 
-    /// @custom:storage-location erc7201:apexevaluator.storage
+    /// @dev Storage location for evaluator state.
+    ///      WARNING: The EVALUATOR_STORAGE_LOCATION constant below was set at initial
+    ///      deployment and does NOT match the standard ERC-7201 derivation for the
+    ///      namespace "apexevaluator.storage". Do NOT recalculate using the ERC-7201
+    ///      formula — doing so would point to a different slot and brick the proxy.
     struct EvaluatorStorage {
         IAgenticCommerce erc8183;
         IOptimisticOracleV3 oov3;
@@ -170,9 +174,14 @@ contract APEXEvaluatorUpgradeable is
     /// @dev v4: Issue #13 — restrict initiateAssertion() to job participants + owner
     /// @dev v5: Agent-paid bond — provider calls initiateAssertion() and pays bond directly
     ///          via transferFrom; evaluator bond pool deprecated
-    uint256 public constant VERSION = 5;
+    /// @dev v6: Audit remediation v2 — R1-M01 JobExpiryTooSoon time check,
+    ///          R2-M01 storage annotation fix, R2-I01 TokensRescued event,
+    ///          R2-I03 setBondToken OOv3 whitelist validation
+    uint256 public constant VERSION = 6;
 
-    // keccak256(abi.encode(uint256(keccak256("apexevaluator.storage")) - 1)) & ~bytes32(uint256(0xff))
+    // WARNING (R2-M01): This value does NOT equal the standard ERC-7201 derivation
+    // of "apexevaluator.storage". It is the initial deployment value used by all
+    // deployed proxies and MUST NOT be recalculated or changed.
     bytes32 private constant EVALUATOR_STORAGE_LOCATION =
         0xa3b1f9c8d2e4f0a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f800;
 
@@ -194,6 +203,7 @@ contract APEXEvaluatorUpgradeable is
     event OOv3Updated(address indexed oldOov3, address indexed newOov3);
     event BondTokenUpdated(address indexed oldToken, address indexed newToken);
     event BondBalanceSynced(uint256 oldBalance, uint256 newBalance);
+    event TokensRescued(address indexed token, address indexed to, uint256 amount);
 
     // ============================================================
     //  Errors
@@ -208,6 +218,7 @@ contract APEXEvaluatorUpgradeable is
     error NoAssertionForJob(uint256 jobId);
     error PendingAssertionsExist(uint256 count);
     error CallerNotAllowed(address caller);
+    error JobExpiryTooSoon(uint256 jobId, uint256 expiredAt, uint256 minRequired);
 
     // ============================================================
     //  Constructor (disabled for proxy)
@@ -592,6 +603,7 @@ contract APEXEvaluatorUpgradeable is
         }
 
         IERC20(token).safeTransfer(to, amount);
+        emit TokensRescued(token, to, amount);
     }
 
     /**
@@ -630,6 +642,8 @@ contract APEXEvaluatorUpgradeable is
         require(newBondToken != address(0), "invalid bond token");
         EvaluatorStorage storage $ = _getEvaluatorStorage();
         require($.totalLockedBond == 0, "cannot change bond token with active assertions");
+        // R2-I03: Verify new token is whitelisted by OOv3
+        require($.oov3.getMinimumBond(newBondToken) > 0, "token not whitelisted by OOv3");
         address oldToken = address($.bondToken);
         $.bondToken = IERC20(newBondToken);
         emit BondTokenUpdated(oldToken, newBondToken);
@@ -658,6 +672,11 @@ contract APEXEvaluatorUpgradeable is
         }
         if ($.jobAssertionInitiated[jobId]) {
             revert AssertionAlreadyInitiated(jobId);
+        }
+
+        // R1-M01: Prevent initiating assertions that can't settle before job expires
+        if (job.expiredAt <= block.timestamp + $.liveness) {
+            revert JobExpiryTooSoon(jobId, job.expiredAt, block.timestamp + $.liveness);
         }
 
         uint256 bond = $.oov3.getMinimumBond(address($.bondToken));
