@@ -45,6 +45,7 @@ contract AgenticCommerceUpgradeable is
         uint256 expiredAt;
         JobStatus status;
         address hook;
+        uint64 submittedAt;   // set in submit(); 0 for pre-upgrade jobs
     }
 
     IERC20 public paymentToken;
@@ -212,7 +213,8 @@ contract AgenticCommerceUpgradeable is
             budget: 0,
             expiredAt: expiredAt,
             status: JobStatus.Open,
-            hook: hook
+            hook: hook,
+            submittedAt: 0
         });
         emit JobCreated(jobId, _msgSender(), provider, evaluator, expiredAt, hook);
         _afterHook(hook, jobId, this.createJob.selector, abi.encode(_msgSender(), provider, evaluator));
@@ -302,6 +304,7 @@ contract AgenticCommerceUpgradeable is
         bytes memory hookData = abi.encode(deliverable, optParams);
         _beforeHook(job.hook, jobId, this.submit.selector, hookData);
         job.status = JobStatus.Submitted;
+        job.submittedAt = uint64(block.timestamp);   // ← NEW
         _afterHook(job.hook, jobId, this.submit.selector, hookData);
 
         emit JobSubmitted(jobId, job.provider, deliverable);

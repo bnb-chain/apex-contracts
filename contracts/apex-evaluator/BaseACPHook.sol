@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "./IACPHook.sol";
+import "../IACPHook.sol";
 
 abstract contract BaseACPHook is IACPHook {
     address public immutable acp;

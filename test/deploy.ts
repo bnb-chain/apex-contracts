@@ -27,30 +27,6 @@ export async function deployAPEXProxy(
   return viem.getContractAt("AgenticCommerceUpgradeable", proxy.address);
 }
 
-export async function deployEvaluatorProxy(
-  viem: any,
-  ownerAddress: `0x${string}`,
-  erc8183Address: `0x${string}`,
-  oov3Address: `0x${string}`,
-  bondTokenAddress: `0x${string}`,
-  liveness: bigint
-) {
-  const impl = await viem.deployContract("APEXEvaluatorUpgradeable");
-
-  const initData = encodeFunctionData({
-    abi: impl.abi,
-    functionName: "initialize",
-    args: [ownerAddress, erc8183Address, oov3Address, bondTokenAddress, liveness],
-  });
-
-  const proxy = await viem.deployContract("ERC1967Proxy", [impl.address, initData]);
-  return viem.getContractAt("APEXEvaluatorUpgradeable", proxy.address);
-}
-
-export async function deployMockOOv3(viem: any, minimumBond: bigint) {
-  return viem.deployContract("MockOptimisticOracleV3", [minimumBond]);
-}
-
 export async function createAndFundJob(
   viem: any,
   apex: any,
@@ -65,7 +41,7 @@ export async function createAndFundJob(
   if (!expiredAt) {
     const publicClient = await viem.getPublicClient();
     const block = await publicClient.getBlock();
-    expiredAt = block.timestamp + BigInt(86400); // 24h from current block time
+    expiredAt = block.timestamp + BigInt(86400);
   }
 
   const apexAsClient = await viem.getContractAt("AgenticCommerceUpgradeable", apex.address, {
@@ -76,7 +52,8 @@ export async function createAndFundJob(
     providerAddress, evaluatorAddress, expiredAt, "Test job", hookAddress,
   ]);
 
-  const jobId = BigInt(1);
+  const jobId = await apex.read.jobCounter();
+
   await apexAsClient.write.setBudget([jobId, budget, "0x"]);
 
   await token.write.mint([client.account.address, budget]);

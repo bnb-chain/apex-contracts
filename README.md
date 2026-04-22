@@ -84,11 +84,12 @@ Compiler settings: `Solidity 0.8.28 | Optimizer: 200 runs | viaIR: true | EVM: c
 ## Testing
 
 ```bash
-npm test                    # All tests (109 tests)
+npm test                    # All tests
 npm run test:commerce       # AgenticCommerce unit tests
-npm run test:evaluator      # APEXEvaluator unit tests
+npm run test:router         # EvaluatorRouter unit tests
+npm run test:policy         # OptimisticPolicy unit tests
 npm run test:upgrades       # UUPS upgrade tests
-npm run test:integration    # Full lifecycle integration tests
+npm run test:lifecycle      # Full Router + Policy lifecycle tests (Flows A-F)
 ```
 
 Tests use Node.js built-in test runner with [Hardhat 3 viem plugin](https://hardhat.org/hardhat-runner/plugins/nomicfoundation-hardhat-viem).
@@ -105,21 +106,26 @@ cp .env.example .env
 ### 2. Deploy contracts
 
 ```bash
-# Deploy core escrow
-npm run deploy:commerce -- --network bscTestnet
+# Compile
+npm run compile
 
-# Deploy evaluator (requires OOv3 address)
-npm run deploy:evaluator -- --network bscTestnet
+# Deploy (testnet)
+npm run deploy:commerce:testnet    # only if ACP not yet deployed
+npm run upgrade:commerce:testnet   # to append submittedAt to existing proxy
+npm run deploy:router:testnet
+npm run deploy:policy:testnet
+npm run rotate-admin:testnet       # EOA → Safes (Safes must self-revoke EOA afterwards)
+
+# Deploy (mainnet)
+npm run deploy:timelock:mainnet
+npm run deploy:commerce:mainnet    # only if fresh deploy
+npm run upgrade:commerce:mainnet   # otherwise
+npm run deploy:router:mainnet
+npm run deploy:policy:mainnet
+npm run rotate-admin:mainnet       # DEFAULT_ADMIN_HOLDER must be Timelock address
 ```
 
-### 3. Upgrade existing proxies
-
-```bash
-npm run upgrade:commerce -- --network bscTestnet
-npm run upgrade:evaluator -- --network bscTestnet
-```
-
-### 4. Admin operations
+### 3. Admin operations
 
 ```bash
 npm run admin:set-token -- --network bscTestnet
@@ -145,51 +151,30 @@ See [`deployments/bsc-testnet.json`](deployments/bsc-testnet.json) for the full 
 
 ## Architecture
 
-### Upgradeability (UUPS)
+APEX V1 uses a three-layer architecture:
 
-Both core contracts use the [UUPS proxy pattern](https://docs.openzeppelin.com/contracts/5.x/api/proxy#UUPSUpgradeable) (ERC-1967) with [ERC-7201 namespaced storage](https://eips.ethereum.org/EIPS/eip-7201) for safe storage layout across upgrades. Proxy addresses remain stable; only the implementation is swapped.
+1. **AgenticCommerceUpgradeable** (UUPS proxy, upgradeable)
+   - Stores the ERC-8183 job lifecycle (Open / Funded / Submitted / Completed / Rejected / Expired)
+   - Holds USDT escrow
+   - This version appends a `uint64 submittedAt` field to the `Job` struct
 
-**Upgrade checklist:**
+2. **EvaluatorRouter** (non-proxy, immutable)
+   - Registered as `job.evaluator` for V1 jobs
+   - Maintains `policyWhitelist` and one-shot `jobPolicy[jobId]` bindings
+   - `settle(jobId, evidence)` is permissionless and forwards verdicts to ACP
 
-1. Modify the contract source (do NOT change storage variable order or remove existing variables)
-2. Increment the `NEW_IMPL_SALT` in the upgrade script (each new implementation needs a unique salt)
-3. Run the upgrade: `npm run upgrade:commerce -- --network bscTestnet`
-4. The script will: deploy new implementation via CREATE2 → call `upgradeToAndCall` on the proxy → verify state preservation
-5. Update `ACP_IMPL_ADDRESS` / `OOV3_EVALUATOR_IMPL_ADDRESS` in `.env` and `deployments/bsc-testnet.json`
+3. **OptimisticPolicy** (non-proxy, immutable)
+   - Implements `IPolicy`: *silence = approve* + whitelist-voter reject
+   - Params (`disputeWindow`, `voteQuorum`) are immutable; admin only manages voter set
 
-**Critical constraints for storage compatibility:**
-- `AgenticCommerceUpgradeable` uses flat upgradeable storage (no ERC-7201 namespace) — variable declaration order must never change
-- `APEXEvaluatorUpgradeable` uses ERC-7201 namespaced storage (`"apexevaluator.storage"`) — this namespace ID must never change
-- Storage struct field order must be preserved — only append new fields at the end
-- OpenZeppelin version must stay at `5.4.0` (pinned in `package.json`)
-- Compiler settings must match: `Solidity 0.8.28 | optimizer: 200 runs | viaIR: true | EVM: cancun`
+Governance is split across two Safes:
 
-### Hook System
+- **Upgrade Safe (2-of-3)** — holds `DEFAULT_ADMIN_ROLE`. On mainnet, mediated by a 48h
+  `TimelockController`.
+- **Ops Safe (2-of-3)** — holds `ADMIN_ROLE` on ACP and `admin` on Router + Policy. No timelock.
 
-Each job can optionally specify a hook contract implementing `IACPHook`. The hook receives `beforeAction` and `afterAction` callbacks for `setProvider`, `setBudget`, `fund`, `submit`, `complete`, and `reject`. The `claimRefund` action is deliberately **not** hookable as a safety mechanism.
-
-The `APEXEvaluatorUpgradeable` contract itself implements `IACPHook` — when set as a job's hook, it stores the deliverable hash on submission. After submitting, the provider must separately call `initiateAssertion(jobId)` (approving the bond token to the evaluator first) to start the UMA OOv3 liveness period. The bond is returned to the provider on clean resolution, or redistributed on a won dispute.
-
-### Fee Mechanism
-
-`complete()` deducts two optional fees from the escrowed budget before paying the provider:
-
-- **Platform fee** (`platformFeeBP`) — sent to `platformTreasury`. Set via `setPlatformFee(feeBP, treasury)`.
-- **Evaluator fee** (`evaluatorFeeBP`) — sent to the job's evaluator address. Set via `setEvaluatorFee(feeBP)`.
-
-Both fees are in basis points (1 BP = 0.01%). Combined total must not exceed 10000 BP (100%). Fees are only deducted on `complete()` — never on refunds or rejections.
-
-### Pause / Unpause
-
-`ADMIN_ROLE` can call `pause()` to halt all state-changing operations in an emergency. All core functions (`createJob`, `fund`, `submit`, `complete`, `reject`, etc.) check `whenNotPaused`.
-
-`claimRefund()` is deliberately **exempt from pause** — users must always be able to recover funds after expiry, so the pause mechanism itself cannot become a fund-locking vector.
-
-### Meta-Transactions (ERC-2771) and Permit (ERC-2612)
-
-The contract inherits `ERC2771Context`. All authorization checks use `_msgSender()` instead of `msg.sender`, enabling gasless execution via a trusted forwarder. AI agents can sign intents off-chain and have a facilitator relay the transaction on-chain — no gas required from the agent.
-
-`fundWithPermit()` combines ERC-2612 token approval and funding in a single transaction, eliminating the separate `approve()` call.
+See `docs/superpowers/specs/2026-04-22-evaluator-router-v1-design.md` for the full design and
+`docs/superpowers/plans/2026-04-22-evaluator-router-v1.md` for the implementation plan.
 
 ## Contributing
 

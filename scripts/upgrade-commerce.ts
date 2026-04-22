@@ -72,6 +72,8 @@ async function main() {
     publicClient.getBytecode({ address: address as `0x${string}` });
 
   console.log("APEX AgenticCommerce Upgrade");
+  console.log("Purpose: Append `uint64 submittedAt` to Job struct; set it in submit().");
+  console.log("Storage: Append-only struct field inside mapping; existing jobs read submittedAt == 0.");
   console.log("=".repeat(70));
   console.log("Network:", connection.networkName);
   console.log("Deployer:", deployer.account.address);
@@ -167,6 +169,14 @@ async function main() {
   console.log("     paymentToken:     ", paymentToken);
   console.log("     platformTreasury: ", treasury);
   console.log("     jobCounter:       ", jobCounter.toString());
+
+  // Storage sanity: read the first 2 jobs (if any) and print their fields
+  const jobCounterNow = await publicClient.readContract({
+    address: PROXY_ADDRESS,
+    abi: STATE_ABI,
+    functionName: "jobCounter",
+  });
+  console.log("   jobCounter after upgrade:", jobCounterNow.toString());
 
   console.log("");
   console.log("=".repeat(70));

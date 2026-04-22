@@ -1,0 +1,20 @@
+{
+  "network": "bsc",
+  "chainId": 56,
+  "contracts": {
+    "AgenticCommerceProxy": "",
+    "AgenticCommerceImpl": "",
+    "TimelockController": "",
+    "EvaluatorRouter": "",
+    "OptimisticPolicy": "",
+    "PaymentToken": "",
+    "UpgradeSafe": "",
+    "OpsSafe": ""
+  },
+  "policyConfig": {
+    "disputeWindow": 259200,
+    "voteQuorum": 3,
+    "initialVoters": []
+  },
+  "notes": "Mainnet: DEFAULT_ADMIN_ROLE held by TimelockController; UpgradeSafe is sole proposer."
+}

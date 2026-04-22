@@ -288,7 +288,7 @@ describe("AgenticCommerceUpgradeable", async function () {
       assert.equal(job.budget, budget);
     });
 
-    it("should allow provider to set budget", async () => {
+    it("should reject setBudget from provider (client-only per R2-L04)", async () => {
       const token = await deployMockToken(viem);
       const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
 
@@ -303,11 +303,9 @@ describe("AgenticCommerceUpgradeable", async function () {
         client: { wallet: provider },
       });
 
-      const budget = DEFAULT_BUDGET;
-      await apexAsProvider.write.setBudget([BigInt(1), budget, "0x"]);
-
-      const job = await apex.read.getJob([BigInt(1)]);
-      assert.equal(job.budget, budget);
+      await assert.rejects(
+        apexAsProvider.write.setBudget([BigInt(1), DEFAULT_BUDGET, "0x"]),
+      );
     });
 
     it("should revert if unauthorized (Unauthorized)", async () => {
@@ -1260,6 +1258,54 @@ describe("AgenticCommerceUpgradeable", async function () {
       });
 
       assert.equal(events.length, 0, "Expected no ReputationSignal for Open job rejection");
+    });
+  });
+
+  // ============================================================
+  // submittedAt tracking Tests
+  // ============================================================
+
+  describe("submittedAt tracking", async () => {
+    it("should write submittedAt = block.timestamp on submit", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET,
+      );
+
+      // Before submit: submittedAt == 0
+      const jobBefore = await apex.read.getJob([jobId]);
+      assert.equal(jobBefore.submittedAt, BigInt(0));
+
+      // Submit from provider
+      const apexAsProvider = await viem.getContractAt(
+        "AgenticCommerceUpgradeable", apex.address, { client: { wallet: provider } }
+      );
+      const tx = await apexAsProvider.write.submit([
+        jobId, keccak256(toHex("deliverable")), "0x",
+      ]);
+
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
+      const block = await publicClient.getBlock({ blockHash: receipt.blockHash });
+
+      // After submit: submittedAt == block.timestamp
+      const jobAfter = await apex.read.getJob([jobId]);
+      assert.equal(jobAfter.submittedAt, block.timestamp);
+      assert.equal(jobAfter.status, JobStatus.Submitted);
+    });
+
+    it("getJob should expose submittedAt field", async () => {
+      const token = await deployMockToken(viem);
+      const apex = await deployAPEXProxy(viem, token.address, treasuryAddress, deployerAddress);
+
+      const jobId = await createAndFundJob(
+        viem, apex, token, client, providerAddress, evaluatorAddress, DEFAULT_BUDGET,
+      );
+
+      const job = await apex.read.getJob([jobId]);
+      // Field should exist (even if 0)
+      assert.equal(typeof job.submittedAt, "bigint");
     });
   });
 

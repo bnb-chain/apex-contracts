@@ -25,66 +25,89 @@ Single-package Hardhat project; all on-chain logic lives under `contracts/`.
 ```
 contracts/
   AgenticCommerceUpgradeable.sol  # Core escrow — job lifecycle, fees, pause, meta-tx
-  APEXEvaluatorUpgradeable.sol    # UMA OOv3 evaluator — implements IACPHook, initiates assertions, settles
-  IACPHook.sol                    # ERC-8183 hook interface (beforeAction / afterAction)
-  BaseACPHook.sol                 # Convenience base for custom hooks
-  IAPEXEvaluator.sol              # Evaluator interface
+                                  # Job struct includes uint64 submittedAt (set in submit())
+  EvaluatorRouter.sol             # Non-proxy orchestration: per-job policy binding + permissionless settle
+  OptimisticPolicy.sol            # V1 strategy: silence-approve + whitelist-voter reject
+  IACP.sol                        # Internal interface Router/Policy → ACP (Job shape + getJob/complete/reject)
+  IPolicy.sol                     # Stable cross-version interface Router → Policy
+  IACPHook.sol                    # ERC-8183 hook interface (retained; V1 does not use hooks)
   ERC1967Proxy.sol                # UUPS proxy entrypoint
   MockERC20.sol                   # Test-only ERC-20 with permit
-  MockOptimisticOracleV3.sol      # Test-only OOv3 mock
+  MockPolicy.sol                  # Test-only IPolicy stub for Router unit tests
+  TimelockImport.sol              # Import-only: forces OZ TimelockController into artifacts
 scripts/
-  deploy-all.ts                   # End-to-end deploy orchestrator (commerce + evaluator + wiring)
-  deploy-commerce.ts              # Deploy AgenticCommerce (proxy + impl via CREATE2)
-  deploy-evaluator.ts             # Deploy APEXEvaluator (proxy + impl), auto-deposits bond
-  upgrade-commerce.ts             # Deploy new impl and call upgradeToAndCall on the commerce proxy
-  upgrade-evaluator.ts            # Same, for the evaluator proxy
-  set-payment-token.ts            # Admin helper to rotate the payment token
+  deploy-commerce.ts              # Deploy fresh ACP (proxy + impl)
+  upgrade-commerce.ts             # UUPS upgrade of existing ACP (append submittedAt)
+  deploy-router.ts                # Deploy non-proxy Router
+  deploy-policy.ts                # Deploy immutable OptimisticPolicy
+  deploy-timelock.ts              # Mainnet only — OZ TimelockController
+  rotate-admin.ts                 # EOA → Upgrade Safe + Ops Safe role rotation
+  set-payment-token.ts            # Admin helper (unchanged)
 test/
-  AgenticCommerce.test.ts         # Commerce unit tests
-  APEXEvaluator.test.ts           # Evaluator unit tests
-  Upgrades.test.ts                # UUPS upgrade & storage-compat tests
-  FullJobLifecycle.test.ts        # End-to-end integration tests
+  AgenticCommerce.test.ts         # Commerce unit tests (includes submittedAt)
+  EvaluatorRouter.test.ts         # Router unit tests (uses MockPolicy)
+  OptimisticPolicy.test.ts        # Policy unit tests
+  Upgrades.test.ts                # UUPS upgrade & storage layout safety
+  RouterPolicyLifecycle.test.ts   # End-to-end Flow A-F
   constants.ts                    # Shared test constants
-  deploy.ts                       # Shared test deploy helpers
+  deploy.ts                       # Shared deploy helpers
 deployments/
-  bsc-testnet.json                # Canonical record of proxy + impl addresses and external deps
-hardhat.config.ts                 # Networks (bscTestnet, bsc, bscTestnetFork, localhost), profiles, verify
+  bsc-testnet.json                # Canonical testnet addresses
+  bsc-mainnet.json                # Canonical mainnet addresses
+hardhat.config.ts                 # Networks, profiles, verify
 ```
 
-**Key architectural constraints (do not violate without an upgrade audit):**
+**V1 architectural invariants (do not violate without a formal spec update):**
 
-- `AgenticCommerceUpgradeable` uses **flat upgradeable storage** — never reorder or remove state variables; only append.
-- `APEXEvaluatorUpgradeable` uses **ERC-7201 namespaced storage** with namespace id `"apexevaluator.storage"` — never change the namespace string; only append fields to the struct.
-- Each new implementation deploy **must bump `NEW_IMPL_SALT`** in the upgrade script (CREATE2 requires a unique salt per deployment).
-- `claimRefund()` is **exempt from pause** and **not hookable** — this is a deliberate safety property; do not add `whenNotPaused` or hook callbacks to it.
-- Fees total (`platformFeeBP + evaluatorFeeBP`) must stay ≤ `10000` (100%); fees only deduct on `complete()`, never on refund/reject.
-- OpenZeppelin version is pinned at `5.4.0` — upgrading requires re-running the full `Upgrades.test.ts` suite and auditing storage slots.
+- `AgenticCommerceUpgradeable` uses flat upgradeable storage — never reorder or remove
+  state variables; only append.
+- `EvaluatorRouter` is **non-proxy, immutable code**. To "change" Router semantics you
+  must deploy a new Router contract and migrate new jobs to it.
+- `OptimisticPolicy` is **non-proxy with immutable params**. `disputeWindow` and
+  `voteQuorum` are set in constructor and cannot change. To change params, deploy a new
+  Policy, whitelist it in Router, and let users `registerJob(newPolicy)` voluntarily.
+- `registerJob` is **one-shot per job**, **client-only**, and only valid while
+  `status == Open`. Clients who fund without registering must wait until `expiredAt`
+  and call `claimRefund`.
+- `settle` does **not** re-check `policyWhitelist` — binding is a commitment.
+- `reason` field uses the cross-version-stable encoding
+  `keccak256(abi.encode(policy, verdict, evidenceHash))`.
+- Mainnet `DEFAULT_ADMIN_ROLE` on ACP is held by `TimelockController` (48h delay).
+  Testnet holds it directly in Upgrade Safe (no delay).
+- `claimRefund` remains **not pausable, not hookable** — universal escape hatch.
+- OpenZeppelin pinned at `5.4.0`. Upgrading requires re-running `Upgrades.test.ts`.
 
 ## Common Commands
 
 ```bash
-# Build
-npx hardhat compile
+# Compile
+npm run compile
 
 # Tests
-npm test                          # Full suite (all 4 test files)
+npm test                          # Full suite
 npm run test:commerce             # Commerce unit tests only
-npm run test:evaluator            # Evaluator unit tests only
+npm run test:router               # EvaluatorRouter unit tests
+npm run test:policy               # OptimisticPolicy unit tests
 npm run test:upgrades             # UUPS upgrade & storage-layout tests
-npm run test:integration          # Full job lifecycle integration
+npm run test:lifecycle            # End-to-end Router + Policy lifecycle (Flows A-F)
 
 # Local node
 npm run node                      # Start an in-process Hardhat node
 
-# Deployment (BSC Testnet)
-npm run deploy:testnet            # Uses .env.testnet
-npm run deploy:qa                 # Uses .env.qa (separate QA deployment)
+# Deploy (testnet)
+npm run deploy:commerce:testnet    # only if ACP not yet deployed
+npm run upgrade:commerce:testnet   # to append submittedAt to existing proxy
+npm run deploy:router:testnet
+npm run deploy:policy:testnet
+npm run rotate-admin:testnet       # EOA → Safes (Safes must self-revoke EOA afterwards)
 
-# Upgrades (remember to bump NEW_IMPL_SALT in the script first)
-npm run upgrade:commerce:testnet
-npm run upgrade:evaluator:testnet
-npm run upgrade:commerce:qa
-npm run upgrade:evaluator:qa
+# Deploy (mainnet)
+npm run deploy:timelock:mainnet
+npm run deploy:commerce:mainnet    # only if fresh deploy
+npm run upgrade:commerce:mainnet   # otherwise
+npm run deploy:router:mainnet
+npm run deploy:policy:mainnet
+npm run rotate-admin:mainnet       # DEFAULT_ADMIN_HOLDER must be Timelock address
 
 # Admin ops
 npm run admin:set-token -- --network bscTestnet

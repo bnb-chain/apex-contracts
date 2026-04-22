@@ -8,6 +8,15 @@ export const JobStatus = {
 } as const;
 
 export const DEFAULT_BUDGET = BigInt(10_000_000);
-export const DEFAULT_LIVENESS = BigInt(1800);
-export const DEFAULT_BOND = BigInt(1_000_000_000_000_000_000);
 export const TRUSTED_FORWARDER = "0x0000000000000000000000000000000000000001" as const;
+
+// OptimisticPolicy defaults (used by tests)
+export const DISPUTE_WINDOW_SECONDS = BigInt(3 * 24 * 3600);   // 3 days
+export const VOTE_QUORUM = 3;
+
+// Verdict values from IPolicy
+export const Verdict = {
+  Pending: 0,
+  Approve: 1,
+  Reject: 2,
+} as const;
