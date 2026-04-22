@@ -27,7 +27,6 @@
 .env.*.local
 
 # IDE
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -45,9 +44,6 @@ Thumbs.db
 
 _tmp/
 .gstack/
-
-# Test deployment
-deployments/bscTestnet-test.json
 
 .env.*
 !.env.example

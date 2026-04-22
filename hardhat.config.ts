@@ -21,7 +21,7 @@ const config: HardhatUserConfig = {
   verify: {
     etherscan: {
       apiKey: process.env.ETHERSCAN_API_KEY || "",
-    }
+    },
   },
 
   chainDescriptors: {
@@ -31,8 +31,8 @@ const config: HardhatUserConfig = {
         etherscan: {
           url: "https://testnet.bscscan.com",
           apiUrl: "https://api.etherscan.io/v2/api",
-        }
-      }
+        },
+      },
     },
     56: {
       name: "BSC Mainnet",
@@ -40,9 +40,9 @@ const config: HardhatUserConfig = {
         etherscan: {
           url: "https://bscscan.com",
           apiUrl: "https://api.etherscan.io/v2/api",
-        }
-      }
-    }
+        },
+      },
+    },
   },
   solidity: {
     profiles: {

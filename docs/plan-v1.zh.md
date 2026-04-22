@@ -77,14 +77,14 @@
 
 ## 3 · 角色
 
-| 角色 | 权限 | 持有者 |
-|---|---|---|
-| **Commerce Owner** | `setPlatformFee`、`pause`、UUPS upgrade | 建议使用 multisig |
-| **Router Owner** | `setPolicyWhitelist`、`setCommerce`、UUPS upgrade | 建议使用 multisig |
-| **Policy Admin** | `addVoter`、`removeVoter`、`setQuorum` | 可按 policy 不同 |
-| **Voter** | `voteReject(jobId)` | 白名单地址 |
-| **Client** | 创建、fund、register、dispute | 每个 job 1 人 |
-| **Provider** | 提交 deliverable、触发 `settle` | 每个 job 1 人 |
+| 角色               | 权限                                              | 持有者            |
+| ------------------ | ------------------------------------------------- | ----------------- |
+| **Commerce Owner** | `setPlatformFee`、`pause`、UUPS upgrade           | 建议使用 multisig |
+| **Router Owner**   | `setPolicyWhitelist`、`setCommerce`、UUPS upgrade | 建议使用 multisig |
+| **Policy Admin**   | `addVoter`、`removeVoter`、`setQuorum`            | 可按 policy 不同  |
+| **Voter**          | `voteReject(jobId)`                               | 白名单地址        |
+| **Client**         | 创建、fund、register、dispute                     | 每个 job 1 人     |
+| **Provider**       | 提交 deliverable、触发 `settle`                   | 每个 job 1 人     |
 
 ---
 
@@ -202,13 +202,13 @@ Day 30 │ 任何人 → commerce.claimRefund(jobId)                    [Expired
 
 ### 4.7 · 经济结果摘要
 
-| 路径 | Client 余额 | Provider 余额 | 持续时间 |
-|---|---|---|---|
-| A · Happy | −100 | +95(扣 5% 费用) | 最少 3 天 |
-| B · Rejected | 0 | 0 | 3 天内可完成(投票及时) |
-| C · Stalemate | 0 | 0 | 锁到 `expiredAt`(如 30 天) |
-| D · Open 取消 | 0 | 0 | 立即 |
-| E · 未 submit | 0 | 0 | 锁到 `expiredAt` |
+| 路径          | Client 余额 | Provider 余额   | 持续时间                   |
+| ------------- | ----------- | --------------- | -------------------------- |
+| A · Happy     | −100        | +95(扣 5% 费用) | 最少 3 天                  |
+| B · Rejected  | 0           | 0               | 3 天内可完成(投票及时)     |
+| C · Stalemate | 0           | 0               | 锁到 `expiredAt`(如 30 天) |
+| D · Open 取消 | 0           | 0               | 立即                       |
+| E · 未 submit | 0           | 0               | 锁到 `expiredAt`           |
 
 ---
 
@@ -242,9 +242,17 @@ Day 30 │ 任何人 → commerce.claimRefund(jobId)                    [Expired
 - **Storage**:ERC-7201 命名空间 `"apex.router.storage.v1"`。字段:
   `commerce`、`mapping(uint256 => address) jobPolicy`、
   `mapping(address => bool) policyWhitelist`。
-- **Pause 语义**:`pause()` 只阻断 `registerJob`(即停止接受**新** job);
-  `settle`、`beforeAction`、`afterAction` 不受 pause 影响,保证 in-flight
-  jobs 可以继续走完流程。这是故意设计 —— 支撑 R6 的迁移 SOP。
+- **Pause 语义**:`pause()` 作为 Router 的紧急刹车,阻断 `registerJob`
+  **和** `settle`(截停"新 job"+"新裁决写回内核")。`beforeAction` /
+  `afterAction` **不**走 pause —— 它们是 kernel 在每次 mutating 调用里
+  同步触发的回调,给它们加 `whenNotPaused` 会把 revert 级联到无关的
+  kernel 流程(例如别的 job 的 `fund` / `submit`)。
+  - 这个语义兼顾两件事:
+    1. 发现 Router bug 时,admin 可以在 UUPS upgrade 落地之前立刻
+       冻结所有即将写入内核的 verdict。
+    2. 同时给 R6"截新单 / 排旧单"迁移 SOP 留出空间 —— 先 pause,
+       完成修复或新 Router 部署后 unpause 或走 drain+redeploy。
+  - 客户端永远有通用逃生通道:`commerce.claimRefund`(不 pause、不 hook)。
 - **Public functions**:
   - `registerJob(uint256 jobId, address policy)` — `whenNotPaused`
     - 调用者必须是 `commerce.jobs(jobId).client`。
@@ -254,7 +262,7 @@ Day 30 │ 任何人 → commerce.claimRefund(jobId)                    [Expired
     - `policyWhitelist[policy] == true`。
     - 一次性:`jobPolicy[jobId] == address(0)`。
   - `settle(uint256 jobId, bytes calldata evidence)`(permissionless)
-    - `nonReentrant`。
+    - `nonReentrant` + `whenNotPaused`。
     - 读取 `policy = jobPolicy[jobId]`。
     - 调用 `policy.check(jobId, evidence)`。
     - `verdict == 1 → commerce.complete(jobId, reason, "")`。
@@ -275,9 +283,10 @@ Day 30 │ 任何人 → commerce.claimRefund(jobId)                    [Expired
   - `supportsInterface` — `IACPHook` + `IERC165`。
 - **Admin**:
   - `setPolicyWhitelist(address policy, bool status)`。
-  - `setCommerce(address newCommerce)` — 仅当无 active jobs 时允许
-    (未来迁移 hatch;见 §6 R5)。
-  - `pause()` / `unpause()` — `onlyOwner`;仅阻断 `registerJob`(见 R6)。
+  - `setCommerce(address newCommerce)` — 仅当 Router 处于 paused 状态时
+    允许(未来迁移 hatch;见 §6 R5)。
+  - `pause()` / `unpause()` — `onlyOwner`;同时阻断 `registerJob` 与
+    `settle`(紧急刹车,另见 R6)。
   - `_authorizeUpgrade` — `onlyOwner`。
 
 ### 5.3 · `OptimisticPolicy.sol`(新增,immutable)
@@ -324,6 +333,7 @@ Day 30 │ 任何人 → commerce.claimRefund(jobId)                    [Expired
 > 的内部契约。集成第三方 ERC-8183 kernel 需要写一个 adapter。
 
 声明:
+
 - `enum JobStatus { Open, Funded, Submitted, Completed, Rejected, Expired }`
 - `struct Job { ... }`(与 Commerce storage 布局一致)
 - `getJob(uint256) → Job memory`
@@ -335,13 +345,16 @@ Day 30 │ 任何人 → commerce.claimRefund(jobId)                    [Expired
 
 ```solidity
 interface IPolicy {
-    function onSubmitted(uint256 jobId, bytes32 deliverable) external;
-    function check(uint256 jobId, bytes calldata evidence)
-        external view returns (uint8 verdict, bytes32 reason);
+  function onSubmitted(uint256 jobId, bytes32 deliverable) external;
+  function check(
+    uint256 jobId,
+    bytes calldata evidence
+  ) external view returns (uint8 verdict, bytes32 reason);
 }
 ```
 
 Verdict 取值:
+
 - `0` = Pending(无动作;Router revert)
 - `1` = Approve(Router 调 Commerce.complete)
 - `2` = Reject(Router 调 Commerce.reject)
@@ -421,8 +434,9 @@ IACP 定义了 Router / Policy 与 Commerce 之间的内部契约,不是 ERC-818
 的严格子集。因此无法直接把 Router 接到第三方 ERC-8183 kernel 上,必须
 写 adapter。
 
-**缓解措施**:`Router.setCommerce(IACP)` 带守卫(仅在无 active jobs 时
-可调)作为未来迁移 hatch。未来可写 `ACPAdapter` 合约适配任意合规 kernel。
+**缓解措施**:`Router.setCommerce(IACP)` 带守卫(仅在 Router paused 时
+可调,由 admin 自行保证 in-flight jobs 已 drain 完)作为未来迁移 hatch。
+未来可写 `ACPAdapter` 合约适配任意合规 kernel。
 
 ### R6 · in-flight jobs 无法强制迁移
 
@@ -435,14 +449,15 @@ IACP 定义了 Router / Policy 与 Commerce 之间的内部契约,不是 ERC-818
 
 **Router 排空 SOP**
 
-1. RouterOwner → `router.pause()`(阻断**新** `registerJob`;已存在的
-   jobs 不受影响 —— `settle`、`beforeAction`、`afterAction` 不进 pause
-   区间,in-flight jobs 可以正常走完)。
-2. 按需部署 `Router2`(新 proxy)。
-3. 更新 SDK / 前端,让新 job 指向 `Router2`。
-4. 旧 Router 上的 in-flight jobs 通过 `settle` 完成,或通过
-   `claimRefund` 过期退款。
-5. 可选:旧 Router 完全排空后可永久 pause 或在文档中正式声明废弃。
+1. RouterOwner → `router.pause()`(阻断**新** `registerJob` **以及**
+   `settle`;`beforeAction` / `afterAction` 不进 pause 区间,kernel
+   的其它调用路径不会被级联 revert)。
+2. 调查 + 修复。如果只是需要换 Router,按需部署 `Router2`(新 proxy),
+   更新 SDK / 前端,让新 job 指向 `Router2`;如果是 Router1 内部 bug,
+   可先 `router.upgradeToAndCall(...)` 走 UUPS 热修。
+3. 确认修复后再 `unpause` 恢复 `settle`,让旧 Router 的 in-flight jobs
+   完成清算;无法清算的 jobs 等到 `expiredAt` 走 `claimRefund` 退款。
+4. 可选:旧 Router 完全排空后可永久 pause 或在文档中正式声明废弃。
 
 **Commerce 排空 SOP**
 
@@ -511,6 +526,8 @@ IACP 定义了 Router / Policy 与 Commerce 之间的内部契约,不是 ERC-818
 
 - `contracts/IACPHook.sol`
 - `contracts/MockERC20.sol`
+- `contracts/ERC1967Proxy.sol`(对 OZ Proxy 的薄封装,用于 hardhat-viem 在
+  测试和脚本中部署 proxy)
 - `hardhat.config.ts`(精简)
 - `CLAUDE.md`、`LICENSE`、`.gitignore`、`.prettierrc`、`.solhint.json`、
   `.nvmrc`、`tsconfig.json`
@@ -520,7 +537,6 @@ IACP 定义了 Router / Policy 与 Commerce 之间的内部契约,不是 ERC-818
 - `contracts/APEXEvaluatorUpgradeable.sol`
 - `contracts/IAPEXEvaluator.sol`
 - `contracts/BaseACPHook.sol`
-- `contracts/ERC1967Proxy.sol`
 - `contracts/MockOptimisticOracleV3.sol`
 - 现有所有 `scripts/*`
 - 现有所有 `test/*`
@@ -538,8 +554,9 @@ IACP 定义了 Router / Policy 与 Commerce 之间的内部契约,不是 ERC-818
 
 ## 9 · Verify(完成定义)
 
-1. `npx hardhat compile` 在 `solc 0.8.28 + viaIR` 下无警告通过。
-2. `npm test` — 所有用例通过,预期 45–55 个。
+1. `bun run compile` (== `bunx hardhat compile`) 在 `solc 0.8.28 + viaIR`
+   下无警告通过。
+2. `bun test` — 所有用例通过,当前 62 个,约 1.3s。
 3. ERC-8183 conformance 测试:
    - 6 状态完整转换矩阵。
    - `setBudget` 可由 client 或 provider 调用。
@@ -559,15 +576,14 @@ IACP 定义了 Router / Policy 与 Commerce 之间的内部契约,不是 ERC-818
    - `registerJob` 权限 / 状态 / whitelist 校验。
    - `settle` 三分支分发(Pending revert、Approve 调 complete、Reject 调 reject)。
    - `_authorizeUpgrade` 仅 owner。
-   - `setCommerce` 仅在无 active job 时可调。
-   - `pause()` 只阻断 `registerJob`,**不**阻断 `settle` /
-     `beforeAction` / `afterAction`(in-flight jobs 在 pause 期间必须继续
-     正常工作)。
-   - `unpause()` 恢复 `registerJob`。
+   - `setCommerce` 仅在 paused 状态下可调。
+   - `pause()` 同时阻断 `registerJob` 与 `settle`;`beforeAction` /
+     `afterAction` 不受 pause 影响(kernel 其它流程不能被级联 revert)。
+   - `unpause()` 恢复 `registerJob` 与 `settle`。
 6. Policy voter 账本:
    - `addVoter` 使 `activeVoterCount` +1;重复添加 revert。
    - `removeVoter` -1;若会导致低于 `voteQuorum` 则 revert。
    - `setQuorum` 在 `== 0` 或 `> activeVoterCount` 时 revert。
 7. Commerce 和 Router 各做一次 UUPS mock 升级(新增字段 → 读旧 state)。
-8. `scripts/deploy.ts` 在 `bscTestnet` 端到端跑通;三个地址落盘到
-   `deployments/<network>.json`。
+8. `scripts/deploy.ts` 在 `bscTestnet` 端到端跑通;三个地址以 TypeScript 片段
+   形式打印到 stdout,供人工粘贴并提交到 `scripts/addresses.ts`。

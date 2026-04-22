@@ -1,27 +1,29 @@
 {
   "name": "apex-contracts",
   "version": "1.0.0",
-  "description": "APEX (Agent Payment Exchange) Protocol - Smart Contracts",
+  "description": "APEX (Agent Payment Exchange) Protocol v1 — ERC-8183 kernel + pluggable Evaluator Router + Optimistic Policy",
   "scripts": {
-    "compile": "npx hardhat compile",
-    "test": "node --import tsx --test test/AgenticCommerce.test.ts test/APEXEvaluator.test.ts test/Upgrades.test.ts test/FullJobLifecycle.test.ts",
-    "test:commerce": "node --import tsx --test test/AgenticCommerce.test.ts",
-    "test:evaluator": "node --import tsx --test test/APEXEvaluator.test.ts",
-    "test:upgrades": "node --import tsx --test test/Upgrades.test.ts",
-    "test:integration": "node --import tsx --test test/FullJobLifecycle.test.ts",
-    "deploy:testnet": "DOTENV_CONFIG_PATH=.env.testnet npx hardhat run scripts/deploy-all.ts --network bscTestnet",
-    "deploy:qa": "DOTENV_CONFIG_PATH=.env.qa npx hardhat run scripts/deploy-all.ts --network bscTestnet",
-    "upgrade:commerce:testnet": "DOTENV_CONFIG_PATH=.env.testnet npx hardhat run scripts/upgrade-commerce.ts --network bscTestnet",
-    "upgrade:evaluator:testnet": "DOTENV_CONFIG_PATH=.env.testnet npx hardhat run scripts/upgrade-evaluator.ts --network bscTestnet",
-    "upgrade:commerce:qa": "DOTENV_CONFIG_PATH=.env.qa npx hardhat run scripts/upgrade-commerce.ts --network bscTestnet",
-    "upgrade:evaluator:qa": "DOTENV_CONFIG_PATH=.env.qa npx hardhat run scripts/upgrade-evaluator.ts --network bscTestnet",
-    "admin:set-token": "npx hardhat run scripts/set-payment-token.ts",
-    "node": "npx hardhat node"
+    "compile": "bunx hardhat compile",
+    "test": "bun test test/",
+    "test:commerce": "bun test test/AgenticCommerce.test.ts",
+    "test:router": "bun test test/EvaluatorRouter.test.ts",
+    "test:policy": "bun test test/OptimisticPolicy.test.ts",
+    "test:lifecycle": "bun test test/Lifecycle.test.ts",
+    "deploy:local": "bunx hardhat run scripts/deploy.ts --network localhost",
+    "deploy:testnet": "DOTENV_CONFIG_PATH=.env.testnet bunx hardhat run scripts/deploy.ts --network bscTestnet",
+    "upgrade:commerce:testnet": "DOTENV_CONFIG_PATH=.env.testnet bunx hardhat run scripts/upgrade-commerce.ts --network bscTestnet",
+    "upgrade:router:testnet": "DOTENV_CONFIG_PATH=.env.testnet bunx hardhat run scripts/upgrade-router.ts --network bscTestnet",
+    "fund:local": "bunx hardhat run scripts/fund-local.ts --network localhost",
+    "node": "bunx hardhat node",
+    "lint:sol": "bunx solhint 'contracts/**/*.sol'",
+    "format:check": "bunx prettier --check 'contracts/**/*.sol' '{scripts,test}/**/*.ts' '*.{ts,json,md}' 'docs/**/*.md'",
+    "format": "bunx prettier --write 'contracts/**/*.sol' '{scripts,test}/**/*.ts' '*.{ts,json,md}' 'docs/**/*.md'"
   },
   "keywords": [
     "apex",
     "agent-commerce",
     "erc-8183",
+    "optimistic-oracle",
     "smart-contracts"
   ],
   "author": "",
@@ -29,7 +31,6 @@
   "type": "module",
   "devDependencies": {
     "@nomicfoundation/hardhat-ethers": "^4.0.1",
-    "@nomicfoundation/hardhat-keystore": "^3.0.2",
     "@nomicfoundation/hardhat-network-helpers": "^3.0.1",
     "@nomicfoundation/hardhat-node-test-runner": "^3.0.4",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.0",
@@ -40,12 +41,14 @@
     "@types/node": "^22.18.8",
     "ethers": "^6.15.0",
     "hardhat": "^3.0.6",
+    "prettier": "^3.8.3",
+    "prettier-plugin-solidity": "^2.3.1",
+    "solhint": "^6.2.1",
     "typescript": "~5.8.0",
     "viem": "^2.38.0"
   },
   "dependencies": {
     "@openzeppelin/contracts": "5.4.0",
-    "@safe-global/safe-singleton-factory": "^2.0.0",
     "dotenv": "^17.2.3"
   }
 }

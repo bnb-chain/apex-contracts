@@ -1,208 +1,187 @@
-# APEX Contracts
+# APEX Contracts — v1
 
-**Agent Payment Exchange (APEX) Protocol** — Trustless on-chain escrow for autonomous agent-to-agent commerce on BNB Smart Chain.
+APEX (Agent Payment Exchange) is an ERC-8183 Agentic Commerce Protocol
+deployment coupled with a pluggable, UMA-style Optimistic evaluation policy.
 
-- Agents create, fund, evaluate, and settle jobs without human intervention
-- Built-in dispute resolution via [UMA Optimistic Oracle V3](https://docs.uma.xyz/protocol-overview/how-does-umas-oracle-work)
-- Extensible hook system ([ERC-8183](https://eips.ethereum.org/EIPS/eip-8183)) for custom evaluation logic
-- Upgradeable via UUPS proxy pattern with stable addresses
-
-## How It Works
-
-APEX defines a job lifecycle between two AI agents — a **Client** (who pays) and a **Provider** (who delivers). An **Evaluator** (human or contract) attests to the work quality before funds are released.
+This repository implements a lightweight three-layer architecture:
 
 ```
-Client                    Provider                 Evaluator (APEXEvaluator)
-  │                          │                        │
-  ├── createJob() ──────────►│                        │
-  ├── setBudget() + fund() ──►                        │  (client sets price & pays)
-  │                          ├── submit() ───────────►│  (stores deliverable)
-  │                          ├── approve bond token ──►
-  │                          ├── initiateAssertion() ─►  (UMA OOv3 liveness starts)
-  │                          │                        │
-  │                  (liveness period, ~2h)           │
-  │                          │                        │
-  │                          │  [anyone] settleJob() ─►  (OOv3 callback)
-  │                          │                        ├── complete() ──► Provider paid + bond returned
-  │                          │                        └── reject()  ──► Client refunded
-  │                          │
-  └── claimRefund() ─────────────── (if expired) ────► Client refunded
+┌────────────────────┐    job.evaluator,     ┌───────────────────────┐
+│                    │    job.hook           │                       │
+│ AgenticCommerce    │ ──────────────────▶   │  EvaluatorRouter      │
+│ Upgradeable (UUPS) │                       │  Upgradeable (UUPS)   │
+│ ERC-8183 kernel    │ ◀──────────────────── │  IACPHook + admin     │
+└────────────────────┘    hook callbacks     └──────────┬────────────┘
+                                                        │
+                                                        ▼
+                                              ┌───────────────────────┐
+                                              │  OptimisticPolicy     │
+                                              │  (immutable)          │
+                                              │  default-approve +    │
+                                              │  client dispute +     │
+                                              │  voter quorum reject  │
+                                              └───────────────────────┘
 ```
 
-### State Machine
+- `AgenticCommerceUpgradeable` — ERC-8183 job-escrow kernel. Holds funds,
+  runs the state machine, calls hooks.
+- `EvaluatorRouterUpgradeable` — acts as both `job.evaluator` and `job.hook`.
+  Whitelists policies, binds each registered job to a policy, and settles
+  jobs by pulling a verdict from the bound policy.
+- `OptimisticPolicy` — immutable policy contract. Silence within a dispute
+  window auto-approves. A client dispute forces a whitelisted-voter quorum
+  to reject; otherwise the job stays pending until the kernel's
+  `claimRefund` escape hatch kicks in at expiry.
 
-```
-Open ──► Funded ──► Submitted ──┬── Completed (provider paid)
- │                              ├── Rejected  (client refunded)
- └── Rejected (client only)     └── Expired   (client refunded)
-```
+See `docs/plan-v1.zh.md` for the full
+design document — architecture, user flows, risks, and verification matrix.
 
-## Contracts
-
-| Contract | Purpose |
-|---|---|
-| [`AgenticCommerceUpgradeable`](contracts/AgenticCommerceUpgradeable.sol) | Core escrow — job creation, funding, submission, payout, and refund |
-| [`APEXEvaluatorUpgradeable`](contracts/APEXEvaluatorUpgradeable.sol) | UMA OOv3-based evaluator — provider calls `initiateAssertion()` after submit, settles after liveness period |
-| [`IACPHook`](contracts/IACPHook.sol) | Hook interface — `beforeAction` / `afterAction` callbacks per job action |
-| [`BaseACPHook`](contracts/BaseACPHook.sol) | Convenience base for building custom hooks |
-| [`IAPEXEvaluator`](contracts/IAPEXEvaluator.sol) | Evaluator interface |
-
-### Directory Layout
+## Layout
 
 ```
 contracts/
-├── AgenticCommerceUpgradeable.sol  # Core escrow
-├── APEXEvaluatorUpgradeable.sol    # UMA OOv3 evaluator
-├── IACPHook.sol                    # Hook interface
-├── IAPEXEvaluator.sol              # Evaluator interface
-├── BaseACPHook.sol                 # Hook base class
-├── ERC1967Proxy.sol                # UUPS proxy
-├── MockERC20.sol                   # Test mock
-└── MockOptimisticOracleV3.sol      # Test mock
+  AgenticCommerceUpgradeable.sol   ERC-8183 kernel (UUPS, Pausable)
+  EvaluatorRouterUpgradeable.sol   Routing layer (UUPS, Pausable, ERC-7201)
+  OptimisticPolicy.sol             Pluggable optimistic policy (immutable)
+  IACP.sol                         Router/Policy ↔ Commerce interface
+  IPolicy.sol                      Router ↔ Policy interface
+  IACPHook.sol                     ERC-8183 hook interface
+  ERC1967Proxy.sol                 Test-helper wrapper around OZ's proxy
+  MockERC20.sol                    Test payment token
+scripts/
+  deploy.ts                        One-shot stack deployment
+  upgrade-commerce.ts              Upgrade the kernel impl
+  upgrade-router.ts                Upgrade the router impl (emergency only)
+  addresses.ts                     Hand-committed registry of deployed addresses
+test/
+  helpers.ts                       Shared test fixtures
+  AgenticCommerce.test.ts          Kernel state machine
+  EvaluatorRouter.test.ts          Hook gating + registration
+  OptimisticPolicy.test.ts         Policy admin, dispute + vote
+  Lifecycle.test.ts                End-to-end integration
+docs/
+  plan-v1.zh.md                    Canonical design document
 ```
 
-## Prerequisites
-
-- **Node.js** >= 22.10.0 (required by Hardhat 3)
-- **npm** >= 9
-
-## Installation
+## Getting started
 
 ```bash
-git clone <repo-url> && cd apex-contracts
-npm install
+cp .env.example .env          # fill in BSC_* keys if deploying
+bun install
+bun run compile
+bun test                      # 62 tests, ~1.3s
 ```
 
-## Build
+### Local development
+
+Three terminals, one fresh node per session:
 
 ```bash
-npx hardhat compile
+# terminal 1 — local chain (http://127.0.0.1:8545)
+bun run node
+
+# terminal 2 — deploy the stack onto that node
+bun run deploy:local
+#   copy the ready-to-run fund:local command printed at the bottom
+
+# terminal 2 — top up a test EOA with native coin + MockERC20
+#   (fixed defaults: 10 native coin + 10000 MockERC20).
+#   Env vars are one-shot CLI prefixes; do NOT add them to .env.
+FUND_RECIPIENT=0x... FUND_TOKEN_ADDRESS=0x... bun run fund:local
 ```
 
-Compiler settings: `Solidity 0.8.28 | Optimizer: 200 runs | viaIR: true | EVM: cancun`
+`fund:local` refuses to run on `bsc` or `bscTestnet`. MockERC20 is a
+permissionless-mint test token; never use it as a real payment asset.
 
-## Testing
+### Deploy to BSC Testnet / Mainnet
+
+Prerequisite — fill the pre-deploy inputs in
+[`scripts/addresses.ts`](./scripts/addresses.ts) for the target network, then
+commit:
+
+```ts
+export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
+  bscTestnet: {
+    paymentToken: "0x...", // e.g. USDC on BSC Testnet
+    treasury: "0x...", // EOA or multisig that collects platform fees
+    // commerceProxy / routerProxy / policy come back from deploy stdout
+  },
+};
+```
+
+Then:
 
 ```bash
-npm test                    # All tests (109 tests)
-npm run test:commerce       # AgenticCommerce unit tests
-npm run test:evaluator      # APEXEvaluator unit tests
-npm run test:upgrades       # UUPS upgrade tests
-npm run test:integration    # Full lifecycle integration tests
+cp .env.example .env.testnet
+# fill BSC_TESTNET_PRIVATE_KEY (and ETHERSCAN_API_KEY if you plan to verify)
+bun run deploy:testnet
 ```
 
-Tests use Node.js built-in test runner with [Hardhat 3 viem plugin](https://hardhat.org/hardhat-runner/plugins/nomicfoundation-hardhat-viem).
+Ownership is always the **deployer** at deploy time. Paste the printed
+`commerceProxy` / `routerProxy` / `policy` block back into the same
+`ADDRESSES` entry and commit. `deploy.ts` refuses to run if `commerceProxy`
+is already set for the target network — use `bun run upgrade:commerce:<env>`
+/ `bun run upgrade:router:<env>` instead.
 
-## Deployment
+Upgrade scripts import addresses directly from `scripts/addresses.ts`, so
+they run with zero parameters thereafter.
 
-### 1. Configure environment
+### Post-deploy ownership transfer
 
-```bash
-cp .env.example .env
-# Edit .env with your private key and RPC URL
+Deployer holds full control of Commerce / Router / Policy immediately after
+deploy. Transfer to the production multisig ASAP via the two-step flow (the
+multisig must accept on the second step for the change to take effect):
+
+```solidity
+// Commerce + Router use OpenZeppelin Ownable2Step
+commerce.transferOwnership(multisig);
+router.transferOwnership(multisig);
+// ... then, signed by the multisig:
+commerce.acceptOwnership();
+router.acceptOwnership();
+
+// OptimisticPolicy uses a matching custom pattern
+policy.transferAdmin(multisig);
+// ... signed by the multisig:
+policy.acceptAdmin();
 ```
 
-### 2. Deploy contracts
+After the multisig has accepted ownership, it MUST:
 
-```bash
-# Deploy core escrow
-npm run deploy:commerce -- --network bscTestnet
+1. Add ≥ `INITIAL_QUORUM` voters via `policy.addVoter(addr)`.
+2. Whitelist any additional policies via
+   `router.setPolicyWhitelist(addr, true)` (the deployer-run policy is
+   whitelisted automatically before ownership handoff).
 
-# Deploy evaluator (requires OOv3 address)
-npm run deploy:evaluator -- --network bscTestnet
-```
+### Deployed addresses
 
-### 3. Upgrade existing proxies
+Canonical source of truth: [`scripts/addresses.ts`](./scripts/addresses.ts).
+Implementation addresses are ephemeral and not tracked — derive them from the
+latest `Upgraded` event on each proxy when needed for Etherscan verification.
 
-```bash
-npm run upgrade:commerce -- --network bscTestnet
-npm run upgrade:evaluator -- --network bscTestnet
-```
+## ERC-8183 deviations
 
-### 4. Admin operations
+This deployment knowingly deviates from the spec in two places. Both are
+documented and mitigated:
 
-```bash
-npm run admin:set-token -- --network bscTestnet
-```
+- **Upgradeable contracts (`SHOULD NOT` for hooks).** The Router is UUPS
+  upgradeable and acts as the hook for every registered job. Mitigation:
+  multisig + TimelockController; the operational default is NEVER UPGRADE.
+  For policy replacement use drain-and-redeploy via `router.pause()`.
+- **`reject` on Funded/Submitted is evaluator-only.** Spec allows multiple
+  legitimate rejectors; this kernel deliberately narrows the surface.
 
-## Deployed Addresses
+See `docs/plan-v1.zh.md §3 Design Decisions` and `§6 Risks` for the full list.
 
-### BSC Testnet (Chain ID: 97)
+## Security
 
-| Contract | Proxy | Implementation |
-|---|---|---|
-| AgenticCommerce | [`0x8b121...Fa8A3`](https://testnet.bscscan.com/address/0x8b121FEf5e1688B976D814003f05d9366F3Fa8A3) | `0x028fa...5f987` |
-| APEXEvaluator | [`0x283d8...4be8`](https://testnet.bscscan.com/address/0x283d858244932664bd69eb7FE3b1587b84B14be8) | `0x261be...e7f911` |
+- `ReentrancyGuardTransient` on every mutating state-transition in the
+  kernel and on `settle` in the router.
+- Hook calls are ERC-165 gated at `createJob` and gas-limited to 1 000 000
+  gas at call time (kernel bails out of its own state on hook failure).
+- `claimRefund` is **never** pausable and **never** invokes hooks — it is
+  the universal escape hatch for clients after `expiredAt`.
+- `OptimisticPolicy` enforces `voteQuorum ≤ activeVoterCount` bidirectionally
+  (`setQuorum` and `removeVoter` can both revert to maintain the invariant).
 
-External dependencies:
-
-| Contract | Address |
-|---|---|
-| Payment Token (ERC-20) | [`0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565`](https://testnet.bscscan.com/address/0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565) |
-| UMA Optimistic Oracle V3 | [`0xFc5bb3e475cc9264760Cf33b1e9ea7B87942C709`](https://testnet.bscscan.com/address/0xFc5bb3e475cc9264760Cf33b1e9ea7B87942C709) |
-
-See [`deployments/bsc-testnet.json`](deployments/bsc-testnet.json) for the full record.
-
-## Architecture
-
-### Upgradeability (UUPS)
-
-Both core contracts use the [UUPS proxy pattern](https://docs.openzeppelin.com/contracts/5.x/api/proxy#UUPSUpgradeable) (ERC-1967) with [ERC-7201 namespaced storage](https://eips.ethereum.org/EIPS/eip-7201) for safe storage layout across upgrades. Proxy addresses remain stable; only the implementation is swapped.
-
-**Upgrade checklist:**
-
-1. Modify the contract source (do NOT change storage variable order or remove existing variables)
-2. Increment the `NEW_IMPL_SALT` in the upgrade script (each new implementation needs a unique salt)
-3. Run the upgrade: `npm run upgrade:commerce -- --network bscTestnet`
-4. The script will: deploy new implementation via CREATE2 → call `upgradeToAndCall` on the proxy → verify state preservation
-5. Update `ACP_IMPL_ADDRESS` / `OOV3_EVALUATOR_IMPL_ADDRESS` in `.env` and `deployments/bsc-testnet.json`
-
-**Critical constraints for storage compatibility:**
-- `AgenticCommerceUpgradeable` uses flat upgradeable storage (no ERC-7201 namespace) — variable declaration order must never change
-- `APEXEvaluatorUpgradeable` uses ERC-7201 namespaced storage (`"apexevaluator.storage"`) — this namespace ID must never change
-- Storage struct field order must be preserved — only append new fields at the end
-- OpenZeppelin version must stay at `5.4.0` (pinned in `package.json`)
-- Compiler settings must match: `Solidity 0.8.28 | optimizer: 200 runs | viaIR: true | EVM: cancun`
-
-### Hook System
-
-Each job can optionally specify a hook contract implementing `IACPHook`. The hook receives `beforeAction` and `afterAction` callbacks for `setProvider`, `setBudget`, `fund`, `submit`, `complete`, and `reject`. The `claimRefund` action is deliberately **not** hookable as a safety mechanism.
-
-The `APEXEvaluatorUpgradeable` contract itself implements `IACPHook` — when set as a job's hook, it stores the deliverable hash on submission. After submitting, the provider must separately call `initiateAssertion(jobId)` (approving the bond token to the evaluator first) to start the UMA OOv3 liveness period. The bond is returned to the provider on clean resolution, or redistributed on a won dispute.
-
-### Fee Mechanism
-
-`complete()` deducts two optional fees from the escrowed budget before paying the provider:
-
-- **Platform fee** (`platformFeeBP`) — sent to `platformTreasury`. Set via `setPlatformFee(feeBP, treasury)`.
-- **Evaluator fee** (`evaluatorFeeBP`) — sent to the job's evaluator address. Set via `setEvaluatorFee(feeBP)`.
-
-Both fees are in basis points (1 BP = 0.01%). Combined total must not exceed 10000 BP (100%). Fees are only deducted on `complete()` — never on refunds or rejections.
-
-### Pause / Unpause
-
-`ADMIN_ROLE` can call `pause()` to halt all state-changing operations in an emergency. All core functions (`createJob`, `fund`, `submit`, `complete`, `reject`, etc.) check `whenNotPaused`.
-
-`claimRefund()` is deliberately **exempt from pause** — users must always be able to recover funds after expiry, so the pause mechanism itself cannot become a fund-locking vector.
-
-### Meta-Transactions (ERC-2771) and Permit (ERC-2612)
-
-The contract inherits `ERC2771Context`. All authorization checks use `_msgSender()` instead of `msg.sender`, enabling gasless execution via a trusted forwarder. AI agents can sign intents off-chain and have a facilitator relay the transaction on-chain — no gas required from the agent.
-
-`fundWithPermit()` combines ERC-2612 token approval and funding in a single transaction, eliminating the separate `approve()` call.
-
-## Contributing
-
-Contributions are welcome. Please open an issue first to discuss the change you'd like to make.
-
-To set up for development:
-
-```bash
-npm install
-npx hardhat compile
-npm test
-```
-
-## License
-
-[MIT](LICENSE)
+Please report vulnerabilities privately to `security@apex.example`.

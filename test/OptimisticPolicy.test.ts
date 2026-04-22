@@ -1,0 +1,238 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { network } from "hardhat";
+import { getAddress, keccak256, toBytes, zeroAddress } from "viem";
+
+import {
+  Verdict,
+  DEFAULT_BUDGET,
+  DEFAULT_DISPUTE_WINDOW,
+  deployStack,
+  advanceSeconds,
+  createFundedSubmittedJob,
+} from "./helpers.js";
+
+describe("OptimisticPolicy", async () => {
+  const { viem } = await network.connect();
+  const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W, voter3W] =
+    await viem.getWalletClients();
+  const deployer = getAddress(deployerW.account.address);
+  const treasury = getAddress(treasuryW.account.address);
+  const voter1 = getAddress(voter1W.account.address);
+  const voter2 = getAddress(voter2W.account.address);
+  const voter3 = getAddress(voter3W.account.address);
+
+  async function setup(initialQuorum = 2) {
+    return deployStack(viem, {
+      owner: deployer,
+      treasury,
+      initialQuorum,
+      voters: [voter1, voter2],
+    });
+  }
+
+  async function asWallet<T extends string>(name: T, addr: `0x${string}`, wallet: any) {
+    return viem.getContractAt(name as any, addr, { client: { wallet } });
+  }
+
+  // ==================================================================
+  // Admin: voters
+  // ==================================================================
+
+  describe("admin: voters", () => {
+    it("addVoter increments activeVoterCount", async () => {
+      const { policy } = await setup();
+      assert.equal(await policy.read.activeVoterCount(), 2);
+      await policy.write.addVoter([voter3]);
+      assert.equal(await policy.read.activeVoterCount(), 3);
+      assert.equal(await policy.read.isVoter([voter3]), true);
+    });
+
+    it("removeVoter blocked if it would break quorum", async () => {
+      const { policy } = await setup();
+      // With quorum=2 and 2 voters, removing one would break.
+      await assert.rejects(policy.write.removeVoter([voter1]), /WouldBreakQuorum/);
+    });
+
+    it("removeVoter works when headroom exists", async () => {
+      const { policy } = await setup();
+      await policy.write.addVoter([voter3]); // 3 voters, quorum 2
+      await policy.write.removeVoter([voter1]);
+      assert.equal(await policy.read.activeVoterCount(), 2);
+      assert.equal(await policy.read.isVoter([voter1]), false);
+    });
+
+    it("setQuorum enforces <= activeVoterCount", async () => {
+      const { policy } = await setup();
+      await assert.rejects(policy.write.setQuorum([3]), /QuorumOutOfRange/);
+      await policy.write.addVoter([voter3]);
+      await policy.write.setQuorum([3]);
+      assert.equal(await policy.read.voteQuorum(), 3);
+    });
+
+    it("setQuorum rejects zero", async () => {
+      const { policy } = await setup();
+      await assert.rejects(policy.write.setQuorum([0]), /QuorumZero/);
+    });
+  });
+
+  // ==================================================================
+  // Admin: two-step transfer
+  // ==================================================================
+
+  describe("admin: transfer", () => {
+    it("two-step transfer flow", async () => {
+      const { policy } = await setup();
+      await policy.write.transferAdmin([voter1]);
+      assert.equal(getAddress(await policy.read.pendingAdmin()), voter1);
+      const asPending = await asWallet("OptimisticPolicy", policy.address, voter1W);
+      await asPending.write.acceptAdmin();
+      assert.equal(getAddress(await policy.read.admin()), voter1);
+      assert.equal(getAddress(await policy.read.pendingAdmin()), zeroAddress);
+    });
+
+    it("only pending can accept", async () => {
+      const { policy } = await setup();
+      await policy.write.transferAdmin([voter1]);
+      const asWrong = await asWallet("OptimisticPolicy", policy.address, voter2W);
+      await assert.rejects(asWrong.write.acceptAdmin(), /NotPendingAdmin/);
+    });
+  });
+
+  // ==================================================================
+  // onSubmitted
+  // ==================================================================
+
+  describe("onSubmitted", () => {
+    it("only router can call", async () => {
+      const { policy } = await setup();
+      await assert.rejects(policy.write.onSubmitted([1n, keccak256(toBytes("x"))]), /NotRouter/);
+    });
+
+    it("records submittedAt on first-and-only call (via real submit)", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      assert.notEqual(await ctx.policy.read.submittedAt([jobId]), 0n);
+    });
+  });
+
+  // ==================================================================
+  // check: default-approve path
+  // ==================================================================
+
+  describe("check: default approve", () => {
+    it("returns PENDING before submittedAt", async () => {
+      const { policy } = await setup();
+      const [verdict] = await policy.read.check([999n, "0x"]);
+      assert.equal(verdict, Verdict.Pending);
+    });
+
+    it("returns PENDING within disputeWindow, APPROVE after", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      let [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Pending);
+
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+      [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Approve);
+    });
+  });
+
+  // ==================================================================
+  // dispute + voteReject path
+  // ==================================================================
+
+  describe("dispute + voteReject", () => {
+    it("client raises dispute, voters reach quorum → REJECT", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+
+      const policyAsClient = await asWallet("OptimisticPolicy", ctx.policy.address, clientW);
+      await policyAsClient.write.dispute([jobId]);
+
+      let [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Pending, "1 vote < quorum");
+
+      const policyAsV1 = await asWallet("OptimisticPolicy", ctx.policy.address, voter1W);
+      await policyAsV1.write.voteReject([jobId]);
+
+      [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Pending, "still < quorum");
+
+      const policyAsV2 = await asWallet("OptimisticPolicy", ctx.policy.address, voter2W);
+      await policyAsV2.write.voteReject([jobId]);
+
+      [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Reject);
+    });
+
+    it("dispute outside window reverts", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+      const policyAsClient = await asWallet("OptimisticPolicy", ctx.policy.address, clientW);
+      await assert.rejects(policyAsClient.write.dispute([jobId]), /OutsideDisputeWindow/);
+    });
+
+    it("dispute before submit reverts NotSubmitted", async () => {
+      const ctx = await setup();
+      const policyAsClient = await asWallet("OptimisticPolicy", ctx.policy.address, clientW);
+      await assert.rejects(policyAsClient.write.dispute([42n]), /NotClient|NotSubmitted/);
+    });
+
+    it("non-client cannot dispute", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      const policyAsOther = await asWallet("OptimisticPolicy", ctx.policy.address, voter1W);
+      await assert.rejects(policyAsOther.write.dispute([jobId]), /NotClient/);
+    });
+
+    it("voter cannot vote twice", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      const policyAsClient = await asWallet("OptimisticPolicy", ctx.policy.address, clientW);
+      await policyAsClient.write.dispute([jobId]);
+      const policyAsV1 = await asWallet("OptimisticPolicy", ctx.policy.address, voter1W);
+      await policyAsV1.write.voteReject([jobId]);
+      await assert.rejects(policyAsV1.write.voteReject([jobId]), /AlreadyVoted/);
+    });
+
+    it("non-voter cannot voteReject", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      const policyAsClient = await asWallet("OptimisticPolicy", ctx.policy.address, clientW);
+      await policyAsClient.write.dispute([jobId]);
+      const policyAsStranger = await asWallet("OptimisticPolicy", ctx.policy.address, voter3W);
+      await assert.rejects(policyAsStranger.write.voteReject([jobId]), /NotVoter/);
+    });
+  });
+});

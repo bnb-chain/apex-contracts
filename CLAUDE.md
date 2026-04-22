@@ -2,102 +2,103 @@
 
 ## Project Overview
 
-APEX (Agent Payment Exchange) Protocol — trustless on-chain escrow for autonomous agent-to-agent commerce on BNB Smart Chain. Two AI agents (a Client who pays and a Provider who delivers) transact around a job lifecycle: create → fund → submit → evaluate → settle. An Evaluator (human or contract) attests to work quality before funds release. Dispute resolution runs through [UMA Optimistic Oracle V3](https://docs.uma.xyz/protocol-overview/how-does-umas-oracle-work); extensibility is provided via the [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183) hook interface; contracts are upgradeable via UUPS with stable proxy addresses.
+APEX (Agent Payment Exchange) Protocol v1 — a lightweight [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183) Agentic Commerce Protocol deployment paired with a pluggable, UMA-style optimistic evaluator. Two agents (a Client who pays and a Provider who delivers) transact around the ERC-8183 job lifecycle: create → fund → submit → evaluate → settle. The evaluator is a Router that routes each job to a policy contract; the only v1 policy is `OptimisticPolicy`: default-approve after a dispute window, but a client-raised dispute triggers a whitelisted-voter quorum reject.
+
+See `docs/plan-v1.zh.md` for the authoritative design.
 
 ## Tech Stack
 
-- **Language:** Solidity `0.8.28` (EVM `cancun`, optimizer `200 runs`, `viaIR: true`)
-- **Framework:** Hardhat 3 (`@nomicfoundation/hardhat-toolbox-viem`) with `hardhat-viem`, `hardhat-ethers`, `hardhat-verify`, `hardhat-keystore`
-- **Libraries:** OpenZeppelin `@openzeppelin/contracts@5.4.0` + `@openzeppelin/contracts-upgradeable@5.4.0` (pinned — do not bump without a storage-layout audit)
-- **Proxy pattern:** UUPS (ERC-1967) with ERC-7201 namespaced storage on `APEXEvaluatorUpgradeable`; flat upgradeable storage on `AgenticCommerceUpgradeable`
-- **Deterministic deploy:** `@safe-global/safe-singleton-factory` (CREATE2) — salts live in upgrade scripts
-- **Meta-tx / permit:** ERC-2771 (`ERC2771Context`) and ERC-2612 (`fundWithPermit`)
-- **Oracle:** UMA Optimistic Oracle V3 (external contract on BSC Testnet: `0xFc5bb3e475cc9264760Cf33b1e9ea7B87942C709`)
-- **Test runner:** Node.js built-in test runner via `tsx` (`node --import tsx --test ...`), viem-based assertions
-- **TypeScript:** `~5.8.0`; viem `^2.38.0`; ethers `^6.15.0` (used selectively, primarily for utilities)
-- **Runtime:** Node.js `>= 22.10.0` (required by Hardhat 3), package manager: npm / bun (lockfiles: `package-lock.json`, `bun.lock`)
-- **Linting:** `solhint` (`.solhint.json`), `prettier` (`.prettierrc`)
+- **Language:** Solidity `0.8.28` (EVM `cancun`, optimizer `200 runs`, `viaIR: true`).
+- **Framework:** Hardhat 3 (`@nomicfoundation/hardhat-toolbox-viem`) with `hardhat-viem`, `hardhat-ethers`, `hardhat-verify`.
+- **Libraries:** OpenZeppelin `@openzeppelin/contracts@5.4.0` + `@openzeppelin/contracts-upgradeable@5.4.0` (pinned — storage-layout audit required to bump).
+- **Proxy pattern:** UUPS (ERC-1967). `AgenticCommerceUpgradeable` uses flat upgradeable storage; `EvaluatorRouterUpgradeable` uses ERC-7201 namespaced storage (`apex.router.storage.v1`).
+- **Test runner:** Bun's test runner (`bun test`) — consumes the `node:test` API (`describe`/`it`/`before` + `node:assert/strict`) natively, viem-based assertions.
+- **TypeScript:** `~5.8.0`; viem `^2.38.0`; ethers `^6.15.0` (used for keccak/abi utils). TS files are executed directly by Bun (no tsx/ts-node loader).
+- **Runtime:** Bun `>= 1.3` for dev/test; Node.js `>= 22.10.0` is still required by Hardhat 3 when `bunx hardhat` shells out to its runtime. Package manager: bun (lockfile: `bun.lock`).
+- **Linting / formatting:** `solhint@6.x` (`.solhint.json`) for Solidity static checks; `prettier@3.x` + `prettier-plugin-solidity@2.x` (`.prettierrc`) for `.sol` + `.ts` + `.md` + `.json` formatting. Invoked via `bun run lint:sol` / `bun run format{,:check}`.
 
 ## Architecture
 
-Single-package Hardhat project; all on-chain logic lives under `contracts/`.
+Three-layer design:
 
 ```
 contracts/
-  AgenticCommerceUpgradeable.sol  # Core escrow — job lifecycle, fees, pause, meta-tx
-  APEXEvaluatorUpgradeable.sol    # UMA OOv3 evaluator — implements IACPHook, initiates assertions, settles
-  IACPHook.sol                    # ERC-8183 hook interface (beforeAction / afterAction)
-  BaseACPHook.sol                 # Convenience base for custom hooks
-  IAPEXEvaluator.sol              # Evaluator interface
-  ERC1967Proxy.sol                # UUPS proxy entrypoint
-  MockERC20.sol                   # Test-only ERC-20 with permit
-  MockOptimisticOracleV3.sol      # Test-only OOv3 mock
+  AgenticCommerceUpgradeable.sol   # ERC-8183 kernel (UUPS, Pausable)
+  EvaluatorRouterUpgradeable.sol   # UUPS routing layer (acts as job.evaluator + job.hook)
+  OptimisticPolicy.sol             # Immutable policy: silence-approve + dispute/quorum
+  IACP.sol                         # Implementation-level kernel interface
+  IPolicy.sol                      # Router ↔ policy interface
+  IACPHook.sol                     # ERC-8183 hook interface
+  ERC1967Proxy.sol                 # Test-helper proxy wrapper
+  MockERC20.sol                    # Test payment token
 scripts/
-  deploy-all.ts                   # End-to-end deploy orchestrator (commerce + evaluator + wiring)
-  deploy-commerce.ts              # Deploy AgenticCommerce (proxy + impl via CREATE2)
-  deploy-evaluator.ts             # Deploy APEXEvaluator (proxy + impl), auto-deposits bond
-  upgrade-commerce.ts             # Deploy new impl and call upgradeToAndCall on the commerce proxy
-  upgrade-evaluator.ts            # Same, for the evaluator proxy
-  set-payment-token.ts            # Admin helper to rotate the payment token
+  deploy.ts                        # One-shot stack deployment (print-only; no file side-effects)
+  upgrade-commerce.ts              # Upgrade kernel impl
+  upgrade-router.ts                # Upgrade router impl (emergency only)
+  addresses.ts                     # Hand-committed registry of deployed proxy/policy addresses
 test/
-  AgenticCommerce.test.ts         # Commerce unit tests
-  APEXEvaluator.test.ts           # Evaluator unit tests
-  Upgrades.test.ts                # UUPS upgrade & storage-compat tests
-  FullJobLifecycle.test.ts        # End-to-end integration tests
-  constants.ts                    # Shared test constants
-  deploy.ts                       # Shared test deploy helpers
-deployments/
-  bsc-testnet.json                # Canonical record of proxy + impl addresses and external deps
-hardhat.config.ts                 # Networks (bscTestnet, bsc, bscTestnetFork, localhost), profiles, verify
+  helpers.ts                       # Shared test fixtures
+  AgenticCommerce.test.ts
+  EvaluatorRouter.test.ts
+  OptimisticPolicy.test.ts
+  Lifecycle.test.ts
+docs/
+  plan-v1.zh.md                    # Canonical design document
+hardhat.config.ts                  # Networks (bscTestnet, bsc, bscTestnetFork, localhost)
 ```
 
-**Key architectural constraints (do not violate without an upgrade audit):**
+**Key architectural constraints (never violate without an upgrade audit):**
 
-- `AgenticCommerceUpgradeable` uses **flat upgradeable storage** — never reorder or remove state variables; only append.
-- `APEXEvaluatorUpgradeable` uses **ERC-7201 namespaced storage** with namespace id `"apexevaluator.storage"` — never change the namespace string; only append fields to the struct.
-- Each new implementation deploy **must bump `NEW_IMPL_SALT`** in the upgrade script (CREATE2 requires a unique salt per deployment).
-- `claimRefund()` is **exempt from pause** and **not hookable** — this is a deliberate safety property; do not add `whenNotPaused` or hook callbacks to it.
-- Fees total (`platformFeeBP + evaluatorFeeBP`) must stay ≤ `10000` (100%); fees only deduct on `complete()`, never on refund/reject.
-- OpenZeppelin version is pinned at `5.4.0` — upgrading requires re-running the full `Upgrades.test.ts` suite and auditing storage slots.
+- `AgenticCommerceUpgradeable` uses **flat upgradeable storage** (6 slots + `__gap[44]`). Never reorder or remove fields; only append by shrinking `__gap`.
+- `EvaluatorRouterUpgradeable` uses **ERC-7201 namespaced storage** with id `apex.router.storage.v1`. Never change the namespace; only append fields to `RouterStorage`.
+- `claimRefund()` on the kernel is **not pausable** and **not hookable** — this is a deliberate safety property and the universal escape hatch at expiry.
+- `OptimisticPolicy` maintains the invariant `voteQuorum ≤ activeVoterCount`. `setQuorum` and `removeVoter` both revert when the invariant would break.
+- Router's `beforeAction` / `afterAction` are **not** `nonReentrant` — they sit on the reentrant path `settle → commerce.complete → router.afterAction`. Access control relies on `msg.sender == commerce`.
+- Router is UUPS; it doubles as the ERC-8183 `job.hook`. This deviates from ERC-8183's `SHOULD NOT` for upgradeable hooks. Mitigation: multisig + TimelockController; operational default is NEVER UPGRADE. Prefer drain-and-redeploy via `router.pause()` + expiry refund.
 
 ## Common Commands
 
 ```bash
-# Build
-npx hardhat compile
+# Install
+bun install
 
-# Tests
-npm test                          # Full suite (all 4 test files)
-npm run test:commerce             # Commerce unit tests only
-npm run test:evaluator            # Evaluator unit tests only
-npm run test:upgrades             # UUPS upgrade & storage-layout tests
-npm run test:integration          # Full job lifecycle integration
+# Build
+bun run compile                   # == bunx hardhat compile
+
+# Tests (62 tests, ~1.3s)
+bun test
+bun run test:commerce
+bun run test:router
+bun run test:policy
+bun run test:lifecycle
+
+# Formatting + lint
+bun run format                    # Prettier (+ prettier-plugin-solidity) write
+bun run format:check              # CI gate: fails if anything drifts
+bun run lint:sol                  # solhint — 0 errors required (warnings ok)
 
 # Local node
-npm run node                      # Start an in-process Hardhat node
+bun run node                      # == bunx hardhat node
+
+# Local development (in a second terminal after `bun run node`)
+bun run deploy:local              # Uses .env; deploys stack to localhost
+bun run fund:local                # Sends ETH + MockERC20 to FUND_RECIPIENT
 
 # Deployment (BSC Testnet)
-npm run deploy:testnet            # Uses .env.testnet
-npm run deploy:qa                 # Uses .env.qa (separate QA deployment)
+bun run deploy:testnet            # Uses .env.testnet
 
-# Upgrades (remember to bump NEW_IMPL_SALT in the script first)
-npm run upgrade:commerce:testnet
-npm run upgrade:evaluator:testnet
-npm run upgrade:commerce:qa
-npm run upgrade:evaluator:qa
-
-# Admin ops
-npm run admin:set-token -- --network bscTestnet
+# Upgrades (ownership MUST be multisig + TimelockController on production)
+bun run upgrade:commerce:testnet
+bun run upgrade:router:testnet
 
 # Verification (manual)
-npx hardhat verify --network bscTestnet <impl_address>
+bunx hardhat verify --network bscTestnet <impl_address>
 ```
 
 Required env files per environment (loaded via `DOTENV_CONFIG_PATH`):
 
 - `.env.testnet` — public testnet deploy
-- `.env.qa` — QA deploy (separate keys/addresses from testnet)
-- `.env` — default fallback (used if `DOTENV_CONFIG_PATH` unset)
+- `.env` — default fallback (used if `DOTENV_CONFIG_PATH` unset; local dev)
 
 Never commit any of these. See `.env.example` for the full schema.
 
@@ -113,7 +114,7 @@ Never commit any of these. See `.env.example` for the full schema.
 
 Follow these steps in strict order for every code change request. If you are about to call Edit/Write/Bash without completing Step 1 and receiving explicit approval — STOP. Go back to Step 1.
 
-### Step 0: Research *(new features only — skip for bug fixes)*
+### Step 0: Research _(new features only — skip for bug fixes)_
 
 Before planning, surface your understanding:
 
@@ -138,6 +139,7 @@ Output a plan using this exact format:
 ```
 
 **HARD RULES:**
+
 - After printing the Plan, your message ENDS. No code. No "I'll start by...".
 - Do NOT call Edit, Write, Bash, or any file-modifying tool in this turn.
 - Wait for the user to explicitly reply. Explicit approval = "ok", "go", "yes", "继续", "好", or equivalent.
@@ -201,6 +203,7 @@ Then print a ready-to-run git command — do NOT execute it.
 ## Self-Check Before Every Response
 
 Before responding to a code change request:
+
 1. Have I output a Plan yet? If no → go to Step 1.
 2. Has the user explicitly approved the Plan? If no → do not write any code.
 3. Am I about to call Edit/Write/Bash? If yes and Step 2 hasn't started → STOP.

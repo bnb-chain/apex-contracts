@@ -1,65 +1,82 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import "@openzeppelin/contracts/metatx/ERC2771Context.sol";
-import "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
-import "./IACPHook.sol";
+import {Ownable2StepUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Ownable2StepUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {ERC165Checker} from "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 
+import {IACP} from "./IACP.sol";
+import {IACPHook} from "./IACPHook.sol";
+
+/// @title AgenticCommerceUpgradeable (v1)
+/// @notice Lightweight ERC-8183 Agentic Commerce Protocol kernel.
+/// @dev    UUPS upgradeable. Keeps the full ERC-8183 `MUST`/`SHOULD` surface
+///         and drops non-spec features (meta-transactions, permit, role-based
+///         access, hook whitelist, evaluator fee).
+///
+///         Upgrade governance SHOULD be a multisig + TimelockController.
 contract AgenticCommerceUpgradeable is
+    IACP,
     Initializable,
-    AccessControlUpgradeable,
-    ReentrancyGuardTransient,
+    Ownable2StepUpgradeable,
     PausableUpgradeable,
-    ERC2771Context,
-    UUPSUpgradeable
+    UUPSUpgradeable,
+    ReentrancyGuardTransient
 {
     using SafeERC20 for IERC20;
 
-    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    /// @notice Gas ceiling applied to every hook call per ERC-8183 SHOULD.
     uint256 public constant HOOK_GAS_LIMIT = 1_000_000;
 
-    enum JobStatus {
-        Open,
-        Funded,
-        Submitted,
-        Completed,
-        Rejected,
-        Expired
-    }
+    /// @notice Basis-point denominator. `feeBP = 10_000` = 100%.
+    uint256 public constant BP_DENOMINATOR = 10_000;
 
-    struct Job {
-        uint256 id;
-        address client;
-        address provider;
-        address evaluator;
-        string description;
-        uint256 budget;
-        uint256 expiredAt;
-        JobStatus status;
-        address hook;
-    }
+    // ---------------------------------------------------------------
+    // Storage (flat upgradeable layout; append-only)
+    // ---------------------------------------------------------------
 
-    IERC20 public paymentToken;
+    /// @notice ERC-20 escrow / settlement token. Set once in {initialize}.
+    /// @dev    Stored as `address` so the auto-generated public getter
+    ///         matches `IACP.paymentToken()` exactly.
+    address public paymentToken;
+
+    /// @notice Platform fee in basis points (0..10_000).
     uint256 public platformFeeBP;
-    address public platformTreasury;
-    uint256 public evaluatorFeeBP;
 
-    mapping(uint256 => Job) public jobs;
+    /// @notice Recipient of the platform fee.
+    address public platformTreasury;
+
+    /// @notice Monotonically increasing job id counter.
     uint256 public jobCounter;
-    mapping(address => bool) public whitelistedHooks;
+
+    /// @notice Per-job state, keyed by job id.
+    /// @dev    Exposed as `public` so clients / indexers and the Router/Policy
+    ///         layer can read tuples directly without a helper call.
+    mapping(uint256 jobId => Job job) public jobs;
+
+    /// @notice Whether `setBudget` has been called at least once for `jobId`.
+    ///         Required because `budget == 0` is a legal state before setup.
     mapping(uint256 jobId => bool hasBudget) public jobHasBudget;
 
+    /// @dev Reserved storage slots for future upgrades.
+    uint256[44] private __gap;
+
+    // ---------------------------------------------------------------
+    // Events (ERC-8183 standard set; no ReputationSignal)
+    // ---------------------------------------------------------------
+
     event JobCreated(
-        uint256 indexed jobId, address indexed client, address indexed provider,
-        address evaluator, uint256 expiredAt, address hook
+        uint256 indexed jobId,
+        address indexed client,
+        address indexed provider,
+        address evaluator,
+        uint256 expiredAt,
+        address hook
     );
     event ProviderSet(uint256 indexed jobId, address indexed provider);
     event BudgetSet(uint256 indexed jobId, uint256 amount);
@@ -69,141 +86,153 @@ contract AgenticCommerceUpgradeable is
     event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
     event JobExpired(uint256 indexed jobId);
     event PaymentReleased(uint256 indexed jobId, address indexed provider, uint256 amount);
-    event EvaluatorFeePaid(uint256 indexed jobId, address indexed evaluator, uint256 amount);
     event Refunded(uint256 indexed jobId, address indexed client, uint256 amount);
-    event HookWhitelistUpdated(address indexed hook, bool status);
-    event ReputationSignal(uint256 indexed jobId, address indexed subject, string role, int8 signal);
+    event PlatformFeeUpdated(uint256 feeBP, address indexed treasury);
 
+    // ---------------------------------------------------------------
+    // Errors
+    // ---------------------------------------------------------------
+
+    error ZeroAddress();
     error InvalidJob();
     error WrongStatus();
     error Unauthorized();
-    error ZeroAddress();
     error ExpiryTooShort();
     error ZeroBudget();
-    error ProviderNotSet();
-    error FeesTooHigh();
-    error HookNotWhitelisted();
     error BudgetMismatch();
+    error ProviderNotSet();
+    error FeeTooHigh();
+    error HookMissingInterface();
     error HookCallFailed();
 
+    // ---------------------------------------------------------------
+    // Initialisation
+    // ---------------------------------------------------------------
+
     /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor(address trustedForwarder_) ERC2771Context(trustedForwarder_) {
+    constructor() {
         _disableInitializers();
     }
 
-    function initialize(address paymentToken_, address treasury_, address admin_) public initializer {
-        if (paymentToken_ == address(0) || treasury_ == address(0) || admin_ == address(0))
+    /// @notice One-time initialiser run through the proxy.
+    /// @param paymentToken_ ERC-20 escrow token (immutable after this call).
+    /// @param treasury_     Platform fee recipient.
+    /// @param owner_        Initial owner (RECOMMENDED multisig).
+    function initialize(address paymentToken_, address treasury_, address owner_) external initializer {
+        if (paymentToken_ == address(0) || treasury_ == address(0) || owner_ == address(0)) {
             revert ZeroAddress();
-        __AccessControl_init();
+        }
+        __Ownable_init(owner_);
         __Pausable_init();
-        paymentToken = IERC20(paymentToken_);
+        __UUPSUpgradeable_init();
+
+        paymentToken = paymentToken_;
         platformTreasury = treasury_;
-        _grantRole(DEFAULT_ADMIN_ROLE, admin_);
-        _grantRole(ADMIN_ROLE, admin_);
-        whitelistedHooks[address(0)] = true;
     }
 
-    // ============================================================
-    //  ERC-2771 Overrides
-    // ============================================================
+    // ---------------------------------------------------------------
+    // UUPS
+    // ---------------------------------------------------------------
 
-    function _msgSender() internal view override(ContextUpgradeable, ERC2771Context) returns (address) {
-        return ERC2771Context._msgSender();
-    }
+    function _authorizeUpgrade(address) internal override onlyOwner {}
 
-    function _msgData() internal view override(ContextUpgradeable, ERC2771Context) returns (bytes calldata) {
-        return ERC2771Context._msgData();
-    }
+    // ---------------------------------------------------------------
+    // Admin
+    // ---------------------------------------------------------------
 
-    function _contextSuffixLength() internal view override(ContextUpgradeable, ERC2771Context) returns (uint256) {
-        return ERC2771Context._contextSuffixLength();
-    }
-
-    // ============================================================
-    //  UUPS
-    // ============================================================
-
-    function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
-
-    // ============================================================
-    //  Admin Functions
-    // ============================================================
-
-    function setPlatformFee(uint256 feeBP_, address treasury_) external onlyRole(ADMIN_ROLE) {
+    /// @notice Update the platform fee and treasury address.
+    /// @param  feeBP_     New fee in basis points. Maximum 10_000 (100%).
+    /// @param  treasury_  New fee recipient.
+    function setPlatformFee(uint256 feeBP_, address treasury_) external onlyOwner {
         if (treasury_ == address(0)) revert ZeroAddress();
-        if (feeBP_ + evaluatorFeeBP > 10000) revert FeesTooHigh();
+        if (feeBP_ > BP_DENOMINATOR) revert FeeTooHigh();
         platformFeeBP = feeBP_;
         platformTreasury = treasury_;
+        emit PlatformFeeUpdated(feeBP_, treasury_);
     }
 
-    function setEvaluatorFee(uint256 feeBP_) external onlyRole(ADMIN_ROLE) {
-        if (feeBP_ + platformFeeBP > 10000) revert FeesTooHigh();
-        evaluatorFeeBP = feeBP_;
-    }
-
-    function setHookWhitelist(address hook, bool status) external onlyRole(ADMIN_ROLE) {
-        if (hook == address(0)) revert ZeroAddress();
-        whitelistedHooks[hook] = status;
-        emit HookWhitelistUpdated(hook, status);
-    }
-
-    function pause() external onlyRole(ADMIN_ROLE) {
+    function pause() external onlyOwner {
         _pause();
     }
 
-    function unpause() external onlyRole(ADMIN_ROLE) {
+    function unpause() external onlyOwner {
         _unpause();
     }
 
-    // ============================================================
-    //  Hook Execution (gas-limited per SHOULD)
-    // ============================================================
+    // ---------------------------------------------------------------
+    // Hook dispatch (gas-limited per ERC-8183 SHOULD)
+    // ---------------------------------------------------------------
 
     function _beforeHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
         if (hook == address(0)) return;
+        // ERC-8183 SHOULD: hook dispatch must be gas-limited so a malicious hook
+        // cannot grief the kernel. Only low-level `.call` exposes `{gas: ...}`.
+        // solhint-disable-next-line avoid-low-level-calls
         (bool success, bytes memory returnData) = hook.call{gas: HOOK_GAS_LIMIT}(
             abi.encodeCall(IACPHook.beforeAction, (jobId, selector, data))
         );
         if (!success) {
-            if (returnData.length > 0) {
-                assembly { revert(add(returnData, 32), mload(returnData)) }
-            }
-            revert HookCallFailed();
+            _bubble(returnData);
         }
     }
 
     function _afterHook(address hook, uint256 jobId, bytes4 selector, bytes memory data) internal {
         if (hook == address(0)) return;
+        // ERC-8183 SHOULD: hook dispatch must be gas-limited (see {_beforeHook}).
+        // solhint-disable-next-line avoid-low-level-calls
         (bool success, bytes memory returnData) = hook.call{gas: HOOK_GAS_LIMIT}(
             abi.encodeCall(IACPHook.afterAction, (jobId, selector, data))
         );
         if (!success) {
-            if (returnData.length > 0) {
-                assembly { revert(add(returnData, 32), mload(returnData)) }
-            }
-            revert HookCallFailed();
+            _bubble(returnData);
         }
     }
 
-    // ============================================================
-    //  Core Functions
-    // ============================================================
+    function _bubble(bytes memory returnData) private pure {
+        if (returnData.length > 0) {
+            // Re-raise the hook's original revert reason verbatim. Only assembly
+            // can `revert(dataPtr, dataLen)` with a pre-encoded byte string.
+            // solhint-disable-next-line no-inline-assembly
+            assembly {
+                revert(add(returnData, 32), mload(returnData))
+            }
+        }
+        revert HookCallFailed();
+    }
 
+    // ---------------------------------------------------------------
+    // ERC-8183 core
+    // ---------------------------------------------------------------
+
+    /// @notice Create a new job in the `Open` state.
+    /// @param  provider     Provider address. MAY be `address(0)` (set later
+    ///                      via {setProvider}).
+    /// @param  evaluator    Evaluator address. MUST NOT be zero.
+    /// @param  expiredAt    Unix timestamp at which the job becomes refundable.
+    /// @param  description  Human-readable description.
+    /// @param  hook         Optional hook address. If non-zero MUST implement
+    ///                      {IACPHook} per ERC-165.
     function createJob(
-        address provider, address evaluator, uint256 expiredAt,
-        string calldata description, address hook
-    ) external nonReentrant whenNotPaused returns (uint256) {
+        address provider,
+        address evaluator,
+        uint256 expiredAt,
+        string calldata description,
+        address hook
+    ) external nonReentrant whenNotPaused returns (uint256 jobId) {
         if (evaluator == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
-        if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
         if (hook != address(0)) {
-            if (!ERC165Checker.supportsInterface(hook, type(IACPHook).interfaceId))
-                revert InvalidJob();
+            if (!ERC165Checker.supportsInterface(hook, type(IACPHook).interfaceId)) {
+                revert HookMissingInterface();
+            }
         }
-        uint256 jobId = ++jobCounter;
+
+        unchecked {
+            jobId = ++jobCounter;
+        }
         jobs[jobId] = Job({
             id: jobId,
-            client: _msgSender(),
+            client: msg.sender,
             provider: provider,
             evaluator: evaluator,
             description: description,
@@ -212,18 +241,22 @@ contract AgenticCommerceUpgradeable is
             status: JobStatus.Open,
             hook: hook
         });
-        emit JobCreated(jobId, _msgSender(), provider, evaluator, expiredAt, hook);
-        _afterHook(hook, jobId, this.createJob.selector, abi.encode(_msgSender(), provider, evaluator));
-        return jobId;
+        emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt, hook);
+
+        _afterHook(hook, jobId, this.createJob.selector, abi.encode(msg.sender, provider, evaluator));
     }
 
-    function setProvider(uint256 jobId, address provider_, bytes calldata optParams)
-        external nonReentrant whenNotPaused
-    {
+    /// @notice Client sets the provider after creation (only allowed while Open
+    ///         and while provider is unset).
+    function setProvider(
+        uint256 jobId,
+        address provider_,
+        bytes calldata optParams
+    ) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
-        if (_msgSender() != job.client) revert Unauthorized();
+        if (msg.sender != job.client) revert Unauthorized();
         if (job.provider != address(0)) revert WrongStatus();
         if (provider_ == address(0)) revert ZeroAddress();
 
@@ -235,13 +268,16 @@ contract AgenticCommerceUpgradeable is
         emit ProviderSet(jobId, provider_);
     }
 
-    function setBudget(uint256 jobId, uint256 amount, bytes calldata optParams)
-        external nonReentrant whenNotPaused
-    {
+    /// @notice Set the budget for a job. Per ERC-8183, either `client` or
+    ///         `provider` MAY call this. Front-running on {fund} is prevented
+    ///         by the `expectedBudget` parameter.
+    function setBudget(uint256 jobId, uint256 amount, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
-        if (_msgSender() != job.client) revert Unauthorized(); // R2-L04: client-only to prevent provider front-running fund()
+        if (msg.sender != job.client && msg.sender != job.provider) {
+            revert Unauthorized();
+        }
 
         bytes memory hookData = abi.encode(amount, optParams);
         _beforeHook(job.hook, jobId, this.setBudget.selector, hookData);
@@ -252,49 +288,33 @@ contract AgenticCommerceUpgradeable is
         emit BudgetSet(jobId, amount);
     }
 
-    function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams)
-        external nonReentrant whenNotPaused
-    {
-        _fund(jobId, expectedBudget, optParams);
-    }
-
-    function fundWithPermit(
-        uint256 jobId, uint256 expectedBudget, bytes calldata optParams,
-        uint256 deadline, uint8 v, bytes32 r, bytes32 s
-    ) external nonReentrant whenNotPaused {
-        Job storage job = jobs[jobId];
-        if (job.id == 0) revert InvalidJob();
-        IERC20Permit(address(paymentToken)).permit(
-            _msgSender(), address(this), expectedBudget, deadline, v, r, s
-        );
-        _fund(jobId, expectedBudget, optParams);
-    }
-
-    function _fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) internal {
+    /// @notice Client deposits escrow equal to `expectedBudget`. Reverts if
+    ///         `job.budget != expectedBudget` (front-running guard).
+    function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
-        if (_msgSender() != job.client) revert Unauthorized();
+        if (msg.sender != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
-        if (job.budget == 0) revert ZeroBudget();
+        if (!jobHasBudget[jobId] || job.budget == 0) revert ZeroBudget();
         if (job.budget != expectedBudget) revert BudgetMismatch();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
 
         _beforeHook(job.hook, jobId, this.fund.selector, optParams);
         job.status = JobStatus.Funded;
-        paymentToken.safeTransferFrom(job.client, address(this), job.budget);
+        IERC20(paymentToken).safeTransferFrom(job.client, address(this), job.budget);
         _afterHook(job.hook, jobId, this.fund.selector, optParams);
 
         emit JobFunded(jobId, job.client, job.provider, job.budget);
     }
 
-    function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams)
-        external nonReentrant whenNotPaused
-    {
+    /// @notice Provider submits the deliverable hash, moving the job to the
+    ///         `Submitted` state.
+    function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Funded) revert WrongStatus();
-        if (_msgSender() != job.provider) revert Unauthorized();
+        if (msg.sender != job.provider) revert Unauthorized();
 
         bytes memory hookData = abi.encode(deliverable, optParams);
         _beforeHook(job.hook, jobId, this.submit.selector, hookData);
@@ -304,89 +324,99 @@ contract AgenticCommerceUpgradeable is
         emit JobSubmitted(jobId, job.provider, deliverable);
     }
 
-    function complete(uint256 jobId, bytes32 reason, bytes calldata optParams)
-        external nonReentrant whenNotPaused
-    {
+    /// @notice Evaluator approves a submitted job, releasing payment minus
+    ///         the platform fee.
+    function complete(
+        uint256 jobId,
+        bytes32 reason,
+        bytes calldata optParams
+    ) external override nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Submitted) revert WrongStatus();
-        if (_msgSender() != job.evaluator) revert Unauthorized();
+        if (msg.sender != job.evaluator) revert Unauthorized();
 
         bytes memory hookData = abi.encode(reason, optParams);
         _beforeHook(job.hook, jobId, this.complete.selector, hookData);
         job.status = JobStatus.Completed;
 
         uint256 amount = job.budget;
-        uint256 platformFee = (amount * platformFeeBP) / 10000;
-        uint256 evalFee = (amount * evaluatorFeeBP) / 10000;
-        uint256 net = amount - platformFee - evalFee;
+        uint256 platformFee = (amount * platformFeeBP) / BP_DENOMINATOR;
+        uint256 net = amount - platformFee;
 
         if (platformFee > 0) {
-            paymentToken.safeTransfer(platformTreasury, platformFee);
-        }
-        if (evalFee > 0) {
-            paymentToken.safeTransfer(job.evaluator, evalFee);
-            emit EvaluatorFeePaid(jobId, job.evaluator, evalFee);
+            IERC20(paymentToken).safeTransfer(platformTreasury, platformFee);
         }
         if (net > 0) {
-            paymentToken.safeTransfer(job.provider, net);
+            IERC20(paymentToken).safeTransfer(job.provider, net);
         }
 
         _afterHook(job.hook, jobId, this.complete.selector, hookData);
 
         emit JobCompleted(jobId, job.evaluator, reason);
         emit PaymentReleased(jobId, job.provider, net);
-        emit ReputationSignal(jobId, job.provider, "provider", int8(1));
     }
 
-    function reject(uint256 jobId, bytes32 reason, bytes calldata optParams)
-        external nonReentrant whenNotPaused
-    {
+    /// @notice Reject a job.
+    /// @dev    - Open   : client-only (cancel before escrow).
+    ///         - Funded : evaluator-only (refund client).
+    ///         - Submitted : evaluator-only (refund client).
+    function reject(
+        uint256 jobId,
+        bytes32 reason,
+        bytes calldata optParams
+    ) external override nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
 
-        if (job.status == JobStatus.Open) {
-            if (_msgSender() != job.client) revert Unauthorized();
-        } else if (job.status == JobStatus.Funded || job.status == JobStatus.Submitted) {
-            if (_msgSender() != job.evaluator) revert Unauthorized();
+        JobStatus prev = job.status;
+        if (prev == JobStatus.Open) {
+            if (msg.sender != job.client) revert Unauthorized();
+        } else if (prev == JobStatus.Funded || prev == JobStatus.Submitted) {
+            if (msg.sender != job.evaluator) revert Unauthorized();
         } else {
             revert WrongStatus();
         }
 
         bytes memory hookData = abi.encode(reason, optParams);
         _beforeHook(job.hook, jobId, this.reject.selector, hookData);
-        JobStatus prev = job.status;
         job.status = JobStatus.Rejected;
 
         if ((prev == JobStatus.Funded || prev == JobStatus.Submitted) && job.budget > 0) {
-            paymentToken.safeTransfer(job.client, job.budget);
+            IERC20(paymentToken).safeTransfer(job.client, job.budget);
             emit Refunded(jobId, job.client, job.budget);
-            emit ReputationSignal(jobId, job.provider, "provider", int8(-1));
         }
 
         _afterHook(job.hook, jobId, this.reject.selector, hookData);
 
-        emit JobRejected(jobId, _msgSender(), reason);
+        emit JobRejected(jobId, msg.sender, reason);
     }
 
-    // claimRefund: NOT pausable, NOT hookable (guaranteed recovery path)
+    /// @notice Permissionless refund path after `expiredAt`.
+    /// @dev    - NOT `whenNotPaused` (guaranteed recovery path).
+    ///         - Hooks are NOT invoked on this path.
     function claimRefund(uint256 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
-        if (job.status != JobStatus.Funded && job.status != JobStatus.Submitted)
+        if (job.status != JobStatus.Funded && job.status != JobStatus.Submitted) {
             revert WrongStatus();
+        }
         if (block.timestamp < job.expiredAt) revert WrongStatus();
 
         job.status = JobStatus.Expired;
         if (job.budget > 0) {
-            paymentToken.safeTransfer(job.client, job.budget);
+            IERC20(paymentToken).safeTransfer(job.client, job.budget);
             emit Refunded(jobId, job.client, job.budget);
         }
         emit JobExpired(jobId);
-        emit ReputationSignal(jobId, job.provider, "provider", int8(0));
     }
 
-    function getJob(uint256 jobId) external view returns (Job memory) {
+    // ---------------------------------------------------------------
+    // Views
+    // ---------------------------------------------------------------
+
+    /// @inheritdoc IACP
+    function getJob(uint256 jobId) external view override returns (Job memory) {
         return jobs[jobId];
     }
 }
