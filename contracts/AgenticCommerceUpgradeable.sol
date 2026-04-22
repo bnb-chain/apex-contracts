@@ -85,6 +85,7 @@ contract AgenticCommerceUpgradeable is
     error HookNotWhitelisted();
     error BudgetMismatch();
     error HookCallFailed();
+    error ProviderCannotBeEvaluator();
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor(address trustedForwarder_) ERC2771Context(trustedForwarder_) {
@@ -194,6 +195,7 @@ contract AgenticCommerceUpgradeable is
         string calldata description, address hook
     ) external nonReentrant whenNotPaused returns (uint256) {
         if (evaluator == address(0)) revert ZeroAddress();
+        if (provider != address(0) && provider == evaluator) revert ProviderCannotBeEvaluator();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
         if (!whitelistedHooks[hook]) revert HookNotWhitelisted();
         if (hook != address(0)) {
@@ -226,6 +228,7 @@ contract AgenticCommerceUpgradeable is
         if (_msgSender() != job.client) revert Unauthorized();
         if (job.provider != address(0)) revert WrongStatus();
         if (provider_ == address(0)) revert ZeroAddress();
+        if (provider_ == job.evaluator) revert ProviderCannotBeEvaluator();
 
         bytes memory hookData = abi.encode(provider_, optParams);
         _beforeHook(job.hook, jobId, this.setProvider.selector, hookData);
