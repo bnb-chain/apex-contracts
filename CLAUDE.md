@@ -30,7 +30,11 @@ contracts/
   IPolicy.sol                      # Router ↔ policy interface
   IACPHook.sol                     # ERC-8183 hook interface
   ERC1967Proxy.sol                 # Test-helper proxy wrapper
-  MockERC20.sol                    # Test payment token
+  mocks/                           # Test-only contracts (not deployed to live nets)
+    MockERC20.sol                  # Test payment token
+    RevertingHook.sol              # Proves claimRefund is non-hookable
+    AgenticCommerceV2Mock.sol      # UUPS upgrade target for commerce
+    EvaluatorRouterV2Mock.sol      # UUPS upgrade target for router
 scripts/
   deploy.ts                        # One-shot stack deployment (print-only; no file side-effects)
   upgrade-commerce.ts              # Upgrade kernel impl

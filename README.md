@@ -47,18 +47,27 @@ contracts/
   IPolicy.sol                      Router ↔ Policy interface
   IACPHook.sol                     ERC-8183 hook interface
   ERC1967Proxy.sol                 Test-helper wrapper around OZ's proxy
-  MockERC20.sol                    Test payment token
+  mocks/                           Test-only contracts (not deployed to live networks)
+    MockERC20.sol                  Test payment token
+    RevertingHook.sol              Proves claimRefund is non-hookable
+    AgenticCommerceV2Mock.sol      UUPS upgrade target for commerce tests
+    EvaluatorRouterV2Mock.sol      UUPS upgrade target for router tests
 scripts/
   deploy.ts                        One-shot stack deployment
   upgrade-commerce.ts              Upgrade the kernel impl
   upgrade-router.ts                Upgrade the router impl (emergency only)
   addresses.ts                     Hand-committed registry of deployed addresses
 test/
-  helpers.ts                       Shared test fixtures
-  AgenticCommerce.test.ts          Kernel state machine
-  EvaluatorRouter.test.ts          Hook gating + registration
-  OptimisticPolicy.test.ts         Policy admin, dispute + vote
-  Lifecycle.test.ts                End-to-end integration
+  unit/                            Unit tests (run by `bun test`)
+    helpers.ts                     Shared test fixtures
+    AgenticCommerce.test.ts        Kernel state machine
+    EvaluatorRouter.test.ts        Hook gating + registration
+    OptimisticPolicy.test.ts       Policy admin, dispute + vote
+    Lifecycle.test.ts              Integration on the in-memory chain
+    Upgrades.test.ts               UUPS upgrade coverage
+  e2e/                             End-to-end runner (local + BSC Testnet)
+    runner.ts                      Entry point for `bun run e2e:*`
+    README.md                      E2E setup + balance requirements
 docs/
   design.md                        Canonical design document
   erc-8183-compliance.md           ERC-8183 compliance matrix + change log
@@ -70,7 +79,7 @@ docs/
 cp .env.example .env          # fill in BSC_* keys if deploying
 bun install
 bun run compile
-bun test                      # 62 tests, ~1.3s
+bun test                      # unit tests, ~1.5s
 ```
 
 ### Local development
@@ -93,6 +102,24 @@ FUND_RECIPIENT=0x... FUND_TOKEN_ADDRESS=0x... bun run fund:local
 
 `fund:local` refuses to run on `bsc` or `bscTestnet`. MockERC20 is a
 permissionless-mint test token; never use it as a real payment asset.
+
+### End-to-end runner
+
+A separate runner in `test/e2e/` drives all 5 ERC-8183 user flows
+(silence-approve, dispute-reject, stalemate-expire, open-cancel, never-submit)
+against a real chain:
+
+```bash
+# Local (requires `bun run node` in another terminal) — completes in ~15s
+bun run e2e:local
+
+# BSC Testnet — reuses live proxies + short-window Policy — completes in ~12min
+bun run e2e:testnet
+```
+
+Testnet requires 3 pre-funded wallets (owner, client, provider) configured via
+`.env.testnet`. See [`test/e2e/README.md`](./test/e2e/README.md) for the full
+balance + key matrix.
 
 ### Deploy to BSC Testnet / Mainnet
 
@@ -120,12 +147,25 @@ bun run deploy:testnet
 
 Ownership is always the **deployer** at deploy time. Paste the printed
 `commerceProxy` / `routerProxy` / `policy` block back into the same
-`ADDRESSES` entry and commit. `deploy.ts` refuses to run if `commerceProxy`
-is already set for the target network — use `bun run upgrade:commerce:<env>`
-/ `bun run upgrade:router:<env>` instead.
+`ADDRESSES` entry and commit.
+
+Re-running `deploy:<env>`:
+
+- **Both `commerceProxy` and `routerProxy` already set** → the script reuses
+  the existing proxies and only deploys + whitelists a fresh `OptimisticPolicy`.
+  Paste the new `policy` line back into `ADDRESSES`. This path requires the
+  router owner to still be the deployer; once ownership has been transferred
+  to the multisig, whitelist new policies from the multisig instead.
+- **Only one of the two is set** → the entry is inconsistent and the script
+  errors out. Fix the registry first.
+- **Neither is set** → full stack is deployed; use
+  `bun run upgrade:commerce:<env>` / `bun run upgrade:router:<env>` afterwards
+  to upgrade impls in place.
 
 Upgrade scripts import addresses directly from `scripts/addresses.ts`, so
-they run with zero parameters thereafter.
+they run with zero parameters. Each run always deploys a fresh impl and
+calls `upgradeToAndCall`, so only run them when the Solidity source
+actually changed.
 
 ### Post-deploy ownership transfer
 

@@ -563,12 +563,16 @@ No blocking issues. Revisit in v2:
 - `contracts/IACPHook.sol`
 - `contracts/ERC1967Proxy.sol` (thin wrapper around OZ's proxy for
   hardhat-viem deploys in tests and scripts)
-- `contracts/MockERC20.sol`
+- `contracts/mocks/MockERC20.sol`
+- `contracts/mocks/RevertingHook.sol`
+- `contracts/mocks/AgenticCommerceV2Mock.sol`
+- `contracts/mocks/EvaluatorRouterV2Mock.sol`
 - `test/helpers.ts`
 - `test/AgenticCommerce.test.ts`
 - `test/EvaluatorRouter.test.ts`
 - `test/OptimisticPolicy.test.ts`
 - `test/Lifecycle.test.ts`
+- `test/Upgrades.test.ts`
 - `scripts/deploy.ts`
 - `scripts/fund-local.ts`
 - `scripts/upgrade-commerce.ts`

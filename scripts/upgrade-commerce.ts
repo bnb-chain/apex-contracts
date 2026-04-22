@@ -7,6 +7,10 @@ import { getAddresses } from "./addresses.js";
  *
  * Proxy address is read from scripts/addresses.ts (hand-committed registry).
  * Signer MUST be the current owner.
+ *
+ * This script always deploys a new impl and calls `upgradeToAndCall`. Only
+ * run it when the Solidity source has actually changed — otherwise you'll
+ * just leave an identical orphan impl on chain.
  */
 
 async function main() {

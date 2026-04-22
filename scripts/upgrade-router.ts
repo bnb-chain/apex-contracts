@@ -17,7 +17,9 @@ import { getAddresses } from "./addresses.js";
  * with the current owner. Strongly recommended: route this via a
  * TimelockController.
  *
- * Proxy address is read from scripts/addresses.ts.
+ * Proxy address is read from scripts/addresses.ts. This script always
+ * deploys a new impl; only run it when the Solidity source has actually
+ * changed.
  */
 
 async function main() {
