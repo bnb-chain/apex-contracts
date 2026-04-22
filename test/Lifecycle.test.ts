@@ -35,8 +35,14 @@ describe("End-to-end lifecycle", async () => {
     return ctx;
   }
 
-  async function asWallet<T extends string>(name: T, addr: `0x${string}`, wallet: any) {
-    return viem.getContractAt(name as any, addr, { client: { wallet } });
+  async function asCommerce(addr: `0x${string}`, wallet: any) {
+    return viem.getContractAt("AgenticCommerceUpgradeable", addr, { client: { wallet } });
+  }
+  async function asRouter(addr: `0x${string}`, wallet: any) {
+    return viem.getContractAt("EvaluatorRouterUpgradeable", addr, { client: { wallet } });
+  }
+  async function asPolicy(addr: `0x${string}`, wallet: any) {
+    return viem.getContractAt("OptimisticPolicy", addr, { client: { wallet } });
   }
 
   // ==================================================================
@@ -74,11 +80,11 @@ describe("End-to-end lifecycle", async () => {
       provider: providerW,
     });
 
-    const policyAsClient = await asWallet("OptimisticPolicy", ctx.policy.address, clientW);
+    const policyAsClient = await asPolicy(ctx.policy.address, clientW);
     await policyAsClient.write.dispute([jobId]);
 
-    const policyAsV1 = await asWallet("OptimisticPolicy", ctx.policy.address, voter1W);
-    const policyAsV2 = await asWallet("OptimisticPolicy", ctx.policy.address, voter2W);
+    const policyAsV1 = await asPolicy(ctx.policy.address, voter1W);
+    const policyAsV2 = await asPolicy(ctx.policy.address, voter2W);
     await policyAsV1.write.voteReject([jobId]);
     await policyAsV2.write.voteReject([jobId]);
 
@@ -101,9 +107,9 @@ describe("End-to-end lifecycle", async () => {
       provider: providerW,
     });
 
-    const policyAsClient = await asWallet("OptimisticPolicy", ctx.policy.address, clientW);
+    const policyAsClient = await asPolicy(ctx.policy.address, clientW);
     await policyAsClient.write.dispute([jobId]);
-    const policyAsV1 = await asWallet("OptimisticPolicy", ctx.policy.address, voter1W);
+    const policyAsV1 = await asPolicy(ctx.policy.address, voter1W);
     await policyAsV1.write.voteReject([jobId]); // 1 < quorum of 2
 
     await assert.rejects(ctx.router.write.settle([jobId, "0x"]), /NotDecided/);
@@ -153,11 +159,7 @@ describe("End-to-end lifecycle", async () => {
     // New registrations are also blocked.
     const publicClient = await viem.getPublicClient();
     const block = await publicClient.getBlock();
-    const commerceAsClient = await asWallet(
-      "AgenticCommerceUpgradeable",
-      ctx.commerce.address,
-      clientW,
-    );
+    const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
     await commerceAsClient.write.createJob([
       provider,
       ctx.router.address,
@@ -165,11 +167,7 @@ describe("End-to-end lifecycle", async () => {
       "",
       ctx.router.address,
     ]);
-    const routerAsClient = await asWallet(
-      "EvaluatorRouterUpgradeable",
-      ctx.router.address,
-      clientW,
-    );
+    const routerAsClient = await asRouter(ctx.router.address, clientW);
     await assert.rejects(
       routerAsClient.write.registerJob([2n, ctx.policy.address]),
       /EnforcedPause/,

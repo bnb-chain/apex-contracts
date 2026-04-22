@@ -110,6 +110,8 @@ contract OptimisticPolicy is IPolicy {
     error AlreadyVoted();
     error AlreadyDisputed();
     error NotSubmitted();
+    error NotDisputed();
+    error WrongJobStatus();
     error OutsideDisputeWindow();
     error QuorumOutOfRange();
     error QuorumZero();
@@ -172,6 +174,10 @@ contract OptimisticPolicy is IPolicy {
     }
 
     /// @inheritdoc IPolicy
+    /// @dev Dispute window is `[submittedAt, submittedAt + disputeWindow)`.
+    ///      At exactly `submittedAt + disputeWindow` this function flips to
+    ///      APPROVE while {dispute} starts reverting `OutsideDisputeWindow` —
+    ///      the boundary moment is treated as "already approved".
     function check(
         uint256 jobId,
         bytes calldata /* evidence */
@@ -201,11 +207,21 @@ contract OptimisticPolicy is IPolicy {
     /// @notice Client raises a dispute. MUST be called within `disputeWindow`
     ///         after submission. Flips the job into the "requires quorum"
     ///         path and keeps it PENDING until votes accrue.
+    /// @dev    Window is a half-open interval `[submittedAt, submittedAt +
+    ///         disputeWindow)`: at exactly `submittedAt + disputeWindow` this
+    ///         call reverts and {check} already returns APPROVE. Also reverts
+    ///         once the kernel job has left the `Submitted` state — disputing
+    ///         a Completed / Rejected job is a no-op that wastes gas, so it
+    ///         is rejected up front.
     function dispute(uint256 jobId) external {
         IACP.Job memory job = commerce.getJob(jobId);
         if (msg.sender != job.client) revert NotClient();
+        if (job.status != IACP.JobStatus.Submitted) revert WrongJobStatus();
 
         uint64 ts = submittedAt[jobId];
+        // Defensive: under the current kernel, `status == Submitted` implies
+        // `submittedAt != 0` via {onSubmitted}. The check is retained so an
+        // integration bug in the kernel cannot silently skip the window gate.
         if (ts == 0) revert NotSubmitted();
         if (disputed[jobId]) revert AlreadyDisputed();
         if (block.timestamp >= uint256(ts) + uint256(disputeWindow)) {
@@ -220,10 +236,16 @@ contract OptimisticPolicy is IPolicy {
     ///         at most once per job.
     function voteReject(uint256 jobId) external {
         if (!isVoter[msg.sender]) revert NotVoter();
-        if (!disputed[jobId]) revert NotSubmitted();
+        if (!disputed[jobId]) revert NotDisputed();
         if (hasVoted[jobId][msg.sender]) revert AlreadyVoted();
 
         hasVoted[jobId][msg.sender] = true;
+        // `rejectVotes[jobId]` is uint16 (max 65535). `unchecked` is safe
+        // because {voteReject} is gated by `hasVoted` (1 vote per voter) and
+        // the number of whitelisted voters is bounded by `activeVoterCount`
+        // (also uint16). Reaching overflow would require >65k voters — well
+        // beyond any realistic whitelist size. If the deployment topology
+        // ever grows there, widen both counters to uint32 in the next impl.
         uint16 newCount;
         unchecked {
             newCount = rejectVotes[jobId] + 1;
@@ -240,6 +262,10 @@ contract OptimisticPolicy is IPolicy {
         if (voter == address(0)) revert ZeroAddress();
         if (isVoter[voter]) revert VoterAlreadyExists();
         isVoter[voter] = true;
+        // `activeVoterCount` is uint16 (max 65535). `unchecked` is safe under
+        // realistic voter-set sizes (typically ≪ 100). A future deployment
+        // that ever expects >65k voters MUST widen this field (storage-
+        // layout change → requires upgrade audit) before removing `unchecked`.
         uint16 newCount;
         unchecked {
             newCount = activeVoterCount + 1;

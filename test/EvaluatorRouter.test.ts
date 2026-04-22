@@ -24,8 +24,14 @@ describe("EvaluatorRouterUpgradeable", async () => {
     return (await blockTimestamp(viem)) + BigInt(offset);
   }
 
-  async function asClient<T extends string>(name: T, address: `0x${string}`, wallet: any) {
-    return viem.getContractAt(name as any, address, { client: { wallet } });
+  async function asCommerce(addr: `0x${string}`, wallet: any) {
+    return viem.getContractAt("AgenticCommerceUpgradeable", addr, { client: { wallet } });
+  }
+  async function asRouter(addr: `0x${string}`, wallet: any) {
+    return viem.getContractAt("EvaluatorRouterUpgradeable", addr, { client: { wallet } });
+  }
+  async function asToken(addr: `0x${string}`, wallet: any) {
+    return viem.getContractAt("MockERC20", addr, { client: { wallet } });
   }
 
   // ==================================================================
@@ -57,7 +63,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
   describe("admin", () => {
     it("setPolicyWhitelist is owner-only", async () => {
       const { router, policy } = await setup();
-      const routerAsOther = await asClient("EvaluatorRouterUpgradeable", router.address, otherW);
+      const routerAsOther = await asRouter(router.address, otherW);
       await assert.rejects(
         routerAsOther.write.setPolicyWhitelist([policy.address, true]),
         /OwnableUnauthorizedAccount/,
@@ -73,11 +79,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
 
     it("pause blocks both registerJob and settle", async () => {
       const ctx = await setup();
-      const commerceAsClient = await asClient(
-        "AgenticCommerceUpgradeable",
-        ctx.commerce.address,
-        clientW,
-      );
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         ctx.router.address,
@@ -88,11 +90,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
 
       await ctx.router.write.pause();
 
-      const routerAsClient = await asClient(
-        "EvaluatorRouterUpgradeable",
-        ctx.router.address,
-        clientW,
-      );
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
       await assert.rejects(
         routerAsClient.write.registerJob([1n, ctx.policy.address]),
         /EnforcedPause/,
@@ -109,11 +107,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
 
   describe("registerJob", () => {
     async function seedOpenJob(ctx: Awaited<ReturnType<typeof setup>>) {
-      const commerceAsClient = await asClient(
-        "AgenticCommerceUpgradeable",
-        ctx.commerce.address,
-        clientW,
-      );
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         ctx.router.address,
@@ -127,11 +121,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
     it("client registers job → policy bound", async () => {
       const ctx = await setup();
       await seedOpenJob(ctx);
-      const routerAsClient = await asClient(
-        "EvaluatorRouterUpgradeable",
-        ctx.router.address,
-        clientW,
-      );
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
       await routerAsClient.write.registerJob([1n, ctx.policy.address]);
       assert.equal(
         getAddress(await ctx.router.read.jobPolicy([1n])),
@@ -142,11 +132,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
     it("rejects non-client", async () => {
       const ctx = await setup();
       await seedOpenJob(ctx);
-      const routerAsOther = await asClient(
-        "EvaluatorRouterUpgradeable",
-        ctx.router.address,
-        otherW,
-      );
+      const routerAsOther = await asRouter(ctx.router.address, otherW);
       await assert.rejects(
         routerAsOther.write.registerJob([1n, ctx.policy.address]),
         /NotJobClient/,
@@ -156,22 +142,14 @@ describe("EvaluatorRouterUpgradeable", async () => {
     it("rejects non-whitelisted policy", async () => {
       const ctx = await setup();
       await seedOpenJob(ctx);
-      const routerAsClient = await asClient(
-        "EvaluatorRouterUpgradeable",
-        ctx.router.address,
-        clientW,
-      );
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
       await assert.rejects(routerAsClient.write.registerJob([1n, client]), /PolicyNotWhitelisted/);
     });
 
     it("rejects duplicate registration", async () => {
       const ctx = await setup();
       await seedOpenJob(ctx);
-      const routerAsClient = await asClient(
-        "EvaluatorRouterUpgradeable",
-        ctx.router.address,
-        clientW,
-      );
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
       await routerAsClient.write.registerJob([1n, ctx.policy.address]);
       await assert.rejects(
         routerAsClient.write.registerJob([1n, ctx.policy.address]),
@@ -181,11 +159,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
 
     it("rejects job whose evaluator != router", async () => {
       const ctx = await setup();
-      const commerceAsClient = await asClient(
-        "AgenticCommerceUpgradeable",
-        ctx.commerce.address,
-        clientW,
-      );
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         other, // evaluator = other, not router
@@ -193,11 +167,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
         "",
         ctx.router.address,
       ]);
-      const routerAsClient = await asClient(
-        "EvaluatorRouterUpgradeable",
-        ctx.router.address,
-        clientW,
-      );
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
       await assert.rejects(
         routerAsClient.write.registerJob([1n, ctx.policy.address]),
         /RouterNotEvaluator/,
@@ -206,11 +176,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
 
     it("rejects job whose hook != router", async () => {
       const ctx = await setup();
-      const commerceAsClient = await asClient(
-        "AgenticCommerceUpgradeable",
-        ctx.commerce.address,
-        clientW,
-      );
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         ctx.router.address,
@@ -218,11 +184,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
         "",
         zeroAddress,
       ]);
-      const routerAsClient = await asClient(
-        "EvaluatorRouterUpgradeable",
-        ctx.router.address,
-        clientW,
-      );
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
       await assert.rejects(
         routerAsClient.write.registerJob([1n, ctx.policy.address]),
         /RouterNotHook/,
@@ -253,11 +215,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
   describe("beforeAction(FUND)", () => {
     it("reverts a `fund` call when the job has no registered policy", async () => {
       const ctx = await setup();
-      const commerceAsClient = await asClient(
-        "AgenticCommerceUpgradeable",
-        ctx.commerce.address,
-        clientW,
-      );
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         ctx.router.address,
@@ -268,7 +226,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
 
       await ctx.token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await asClient("MockERC20", ctx.token.address, clientW);
+      const tokenAsClient = await asToken(ctx.token.address, clientW);
       await tokenAsClient.write.approve([ctx.commerce.address, DEFAULT_BUDGET]);
 
       // No registerJob was called → hook's beforeAction(FUND) reverts.

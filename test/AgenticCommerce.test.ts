@@ -40,10 +40,8 @@ describe("AgenticCommerceUpgradeable", async () => {
     return (await blockTimestamp(viem)) + BigInt(offset);
   }
 
-  async function asClient(contract: any, wallet: any) {
-    return viem.getContractAt("AgenticCommerceUpgradeable", contract.address, {
-      client: { wallet },
-    });
+  async function asCommerce(addr: `0x${string}`, wallet: any) {
+    return viem.getContractAt("AgenticCommerceUpgradeable", addr, { client: { wallet } });
   }
 
   // ==================================================================
@@ -103,7 +101,7 @@ describe("AgenticCommerceUpgradeable", async () => {
   describe("createJob", () => {
     it("creates an Open job", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       const expiredAt = await futureTs(3600);
 
       await commerceAsClient.write.createJob([
@@ -125,7 +123,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("rejects zero evaluator", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await assert.rejects(
         commerceAsClient.write.createJob([
           provider,
@@ -140,7 +138,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("rejects expiry <= now + 5min", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await assert.rejects(
         commerceAsClient.write.createJob([
           provider,
@@ -155,7 +153,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("rejects a hook that does not implement IACPHook", async () => {
       const { token, commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       // MockERC20 does not implement IACPHook.
       await assert.rejects(
         commerceAsClient.write.createJob([
@@ -172,7 +170,7 @@ describe("AgenticCommerceUpgradeable", async () => {
     it("reverts when paused", async () => {
       const { commerce } = await setup();
       await commerce.write.pause();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await assert.rejects(
         commerceAsClient.write.createJob([
           provider,
@@ -193,7 +191,7 @@ describe("AgenticCommerceUpgradeable", async () => {
   describe("setProvider", () => {
     it("client can set provider when provider was unset", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         zeroAddress,
         evaluator,
@@ -208,7 +206,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("rejects non-client", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         zeroAddress,
         evaluator,
@@ -216,13 +214,13 @@ describe("AgenticCommerceUpgradeable", async () => {
         "",
         zeroAddress,
       ]);
-      const commerceAsOther = await asClient(commerce, otherW);
+      const commerceAsOther = await asCommerce(commerce.address, otherW);
       await assert.rejects(commerceAsOther.write.setProvider([1n, provider, "0x"]), /Unauthorized/);
     });
 
     it("rejects resetting provider", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
@@ -241,7 +239,7 @@ describe("AgenticCommerceUpgradeable", async () => {
   describe("setBudget", () => {
     it("client OR provider may call", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
@@ -256,7 +254,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(job.budget, DEFAULT_BUDGET);
 
       // Provider can update again (still Open).
-      const commerceAsProvider = await asClient(commerce, providerW);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
       await commerceAsProvider.write.setBudget([1n, DEFAULT_BUDGET * 2n, "0x"]);
       job = await commerce.read.getJob([1n]);
       assert.equal(job.budget, DEFAULT_BUDGET * 2n);
@@ -265,7 +263,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("rejects unauthorized caller", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
@@ -273,7 +271,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         "",
         zeroAddress,
       ]);
-      const commerceAsOther = await asClient(commerce, otherW);
+      const commerceAsOther = await asCommerce(commerce.address, otherW);
       await assert.rejects(
         commerceAsOther.write.setBudget([1n, DEFAULT_BUDGET, "0x"]),
         /Unauthorized/,
@@ -288,7 +286,7 @@ describe("AgenticCommerceUpgradeable", async () => {
   describe("fund", () => {
     async function seedOpen() {
       const { token, commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
@@ -323,7 +321,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("reverts without setBudget", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
@@ -336,7 +334,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("reverts when provider unset", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         zeroAddress,
         evaluator,
@@ -350,6 +348,22 @@ describe("AgenticCommerceUpgradeable", async () => {
         /ProviderNotSet/,
       );
     });
+
+    it("reverts when block.timestamp >= expiredAt", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      const expiredAt = await futureTs(3600);
+      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", zeroAddress]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      // Fast-forward past expiredAt → fund must revert WrongStatus.
+      await advanceSeconds(viem, 3700);
+      await assert.rejects(commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]), /WrongStatus/);
+    });
   });
 
   // ==================================================================
@@ -359,7 +373,7 @@ describe("AgenticCommerceUpgradeable", async () => {
   describe("submit + complete + reject", () => {
     async function fundAndSubmit() {
       const { token, commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
@@ -376,7 +390,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
 
       const deliverable = keccak256(toBytes("payload"));
-      const commerceAsProvider = await asClient(commerce, providerW);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
       await commerceAsProvider.write.submit([1n, deliverable, "0x"]);
       return { token, commerce };
     }
@@ -385,7 +399,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       const { token, commerce } = await fundAndSubmit();
       // Set a 5% fee.
       await commerce.write.setPlatformFee([500n, treasury]);
-      const commerceAsEvaluator = await asClient(commerce, evaluatorW);
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
       await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
 
       const fee = (DEFAULT_BUDGET * 500n) / 10_000n;
@@ -396,9 +410,53 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(job.status, JobStatus.Completed);
     });
 
+    it("complete with feeBP = 0 sends full budget to provider", async () => {
+      const { token, commerce } = await fundAndSubmit();
+      // Fee stays at the initialize-time default (0). Explicit for clarity.
+      await commerce.write.setPlatformFee([0n, treasury]);
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
+      assert.equal(await token.read.balanceOf([provider]), DEFAULT_BUDGET);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+    });
+
+    it("complete with feeBP = 10000 sends full budget to treasury", async () => {
+      const { token, commerce } = await fundAndSubmit();
+      await commerce.write.setPlatformFee([10_000n, treasury]);
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), DEFAULT_BUDGET);
+    });
+
+    it("evaluator rejects a Funded job (no submit) → client refunded", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        zeroAddress,
+      ]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+
+      // Evaluator rejects from Funded, skipping submit.
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
+      assert.equal(await token.read.balanceOf([client]), DEFAULT_BUDGET);
+      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Rejected);
+    });
+
     it("rejects `complete` from non-evaluator", async () => {
       const { commerce } = await fundAndSubmit();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await assert.rejects(
         commerceAsClient.write.complete([1n, ZERO_BYTES32, "0x"]),
         /Unauthorized/,
@@ -407,7 +465,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("evaluator rejects submitted job → client refunded", async () => {
       const { token, commerce } = await fundAndSubmit();
-      const commerceAsEvaluator = await asClient(commerce, evaluatorW);
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
       await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
       assert.equal(await token.read.balanceOf([client]), DEFAULT_BUDGET);
       const job = await commerce.read.getJob([1n]);
@@ -416,7 +474,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("client rejects Open job without refund branch", async () => {
       const { commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
@@ -443,7 +501,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         treasury,
         owner: deployer,
       });
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       const expiredAt = await futureTs(3600);
       await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", zeroAddress]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
@@ -467,7 +525,7 @@ describe("AgenticCommerceUpgradeable", async () => {
 
     it("reverts before expiry", async () => {
       const { token, commerce } = await setup();
-      const commerceAsClient = await asClient(commerce, clientW);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
@@ -484,6 +542,38 @@ describe("AgenticCommerceUpgradeable", async () => {
       await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
       await assert.rejects(commerce.write.claimRefund([1n]), /WrongStatus/);
     });
+
+    it("claimRefund never dispatches to the job hook", async () => {
+      const { token, commerce } = await setup();
+      const hook = await viem.deployContract("RevertingHook", []);
+
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        hook.address,
+      ]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+
+      // Arm the hook: every subsequent beforeAction / afterAction now reverts.
+      // If claimRefund dispatched a hook callback, the refund below would
+      // bubble up `HookCalled` and this test would fail.
+      await hook.write.arm();
+
+      await advanceSeconds(viem, 3700);
+      await commerce.write.claimRefund([1n]);
+
+      assert.equal(await token.read.balanceOf([client]), DEFAULT_BUDGET);
+      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Expired);
+    });
   });
 
   // ==================================================================
@@ -493,7 +583,7 @@ describe("AgenticCommerceUpgradeable", async () => {
   describe("admin", () => {
     it("setPlatformFee only by owner", async () => {
       const { commerce } = await setup();
-      const asOther = await asClient(commerce, otherW);
+      const asOther = await asCommerce(commerce.address, otherW);
       await assert.rejects(
         asOther.write.setPlatformFee([100n, treasury]),
         /OwnableUnauthorizedAccount/,

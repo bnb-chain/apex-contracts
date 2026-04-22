@@ -33,7 +33,7 @@ This repository implements a lightweight three-layer architecture:
   to reject; otherwise the job stays pending until the kernel's
   `claimRefund` escape hatch kicks in at expiry.
 
-See `docs/plan-v1.zh.md` for the full
+See `docs/design.md` for the full
 design document — architecture, user flows, risks, and verification matrix.
 
 ## Layout
@@ -60,7 +60,8 @@ test/
   OptimisticPolicy.test.ts         Policy admin, dispute + vote
   Lifecycle.test.ts                End-to-end integration
 docs/
-  plan-v1.zh.md                    Canonical design document
+  design.md                        Canonical design document
+  erc-8183-compliance.md           ERC-8183 compliance matrix + change log
 ```
 
 ## Getting started
@@ -171,7 +172,7 @@ documented and mitigated:
 - **`reject` on Funded/Submitted is evaluator-only.** Spec allows multiple
   legitimate rejectors; this kernel deliberately narrows the surface.
 
-See `docs/plan-v1.zh.md §3 Design Decisions` and `§6 Risks` for the full list.
+See `docs/design.md §5 Contract Details` and `§6 Risks` for the full list.
 
 ## Security
 

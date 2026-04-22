@@ -4,7 +4,7 @@
 
 APEX (Agent Payment Exchange) Protocol v1 — a lightweight [ERC-8183](https://eips.ethereum.org/EIPS/eip-8183) Agentic Commerce Protocol deployment paired with a pluggable, UMA-style optimistic evaluator. Two agents (a Client who pays and a Provider who delivers) transact around the ERC-8183 job lifecycle: create → fund → submit → evaluate → settle. The evaluator is a Router that routes each job to a policy contract; the only v1 policy is `OptimisticPolicy`: default-approve after a dispute window, but a client-raised dispute triggers a whitelisted-voter quorum reject.
 
-See `docs/plan-v1.zh.md` for the authoritative design.
+See `docs/design.md` for the authoritative design. ERC-8183 compliance status (including the exact spec version reviewed against) is tracked in `docs/erc-8183-compliance.md`.
 
 ## Tech Stack
 
@@ -43,7 +43,8 @@ test/
   OptimisticPolicy.test.ts
   Lifecycle.test.ts
 docs/
-  plan-v1.zh.md                    # Canonical design document
+  design.md                        # Canonical design document
+  erc-8183-compliance.md           # ERC-8183 compliance matrix + change log
 hardhat.config.ts                  # Networks (bscTestnet, bsc, bscTestnetFork, localhost)
 ```
 
@@ -175,6 +176,31 @@ Implement the approved plan exactly. Rules while executing:
 ```
 
 Then print a ready-to-run git command — do NOT execute it.
+
+---
+
+## ERC-8183 Spec-Update Protocol
+
+When the user reports that ERC-8183 has published a new version (e.g. "the
+spec has been updated", "there's a new 8183 draft", or any equivalent),
+treat it as a Step-1 Plan trigger. Do not modify any code yet. Run this
+protocol:
+
+1. **Fetch & diff.** Compare the new spec against the version recorded in
+   the `Spec version reviewed` header of `docs/erc-8183-compliance.md`.
+2. **Plan.** Output a Plan per the Spec-Driven Workflow above, listing
+   every normative delta, the affected contracts/tests, and the
+   migration-risk classification (small = UUPS upgrade, medium = Router
+   interface change, large = fresh deployment).
+3. **Wait for approval.** Do not edit until the user explicitly approves.
+4. **Update the compliance doc.** After approval — even if no code change
+   is needed — refresh `docs/erc-8183-compliance.md`: rewrite the
+   `Summary`, update each row of `Detail Items`, adjust the
+   `Non-blocking Deltas` section, and append a new `Change Log` entry
+   dated today. Bump `Spec version reviewed` and `Last reviewed` in the
+   header.
+5. **Sync design docs.** If behaviour actually changes, update
+   `docs/design.md` so it stays consistent with the code.
 
 ---
 
