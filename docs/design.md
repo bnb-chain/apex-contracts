@@ -575,8 +575,6 @@ No blocking issues. Revisit in v2:
 - `test/Upgrades.test.ts`
 - `scripts/deploy.ts`
 - `scripts/fund-local.ts`
-- `scripts/upgrade-commerce.ts`
-- `scripts/upgrade-router.ts`
 - `scripts/addresses.ts`
 
 ### 8.2 · Configuration / meta

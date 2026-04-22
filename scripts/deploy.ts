@@ -1,36 +1,57 @@
 import { network } from "hardhat";
 import { encodeFunctionData, getAddress, parseUnits } from "viem";
-import { ADDRESSES, getDeployInputs } from "./addresses.js";
+import { ADDRESSES } from "./addresses.js";
 
 /**
- * Deploy the v1 stack in one shot.
+ * Single idempotent deploy / upgrade / rotation script for the v1 stack.
  *
- *   1. MockERC20                   (local networks only)
- *   2. AgenticCommerceUpgradeable  (impl + ERC1967Proxy + initialize)
- *   3. EvaluatorRouterUpgradeable  (impl + ERC1967Proxy + initialize)
- *   4. OptimisticPolicy            (constructor)
- *   5. router.setPolicyWhitelist(policy, true)
+ * Two cascading triggers decide what gets (re)built, in this order:
  *
- * Input resolution:
- *   - owner    : always the deployer signer. Transfer to a multisig
- *                post-deploy via `transferOwnership` / `transferAdmin`.
- *   - paymentToken + treasury:
- *       live networks  — read from ADDRESSES[network] in scripts/addresses.ts
- *       local networks — MockERC20 auto-deployed; treasury = deployer
+ *   1. paymentToken blank in ADDRESSES[network]
+ *        → deploy fresh MockERC20
+ *        → deploy fresh Commerce (new proxy) using that token
+ *        → deploy fresh Router (new proxy) pointing at that new Commerce
+ *        (cfg.commerceProxy / cfg.routerProxy are IGNORED in this branch;
+ *         treat this as "rotate everything".)
  *
- * Re-run behaviour on live networks:
- *   - If both `commerceProxy` and `routerProxy` are already set in
- *     ADDRESSES[network], steps 2 + 3 are SKIPPED: the existing proxies
- *     are reused and we only deploy + whitelist a fresh OptimisticPolicy.
- *     The router owner must still be the deployer for the whitelist call
- *     to succeed; if ownership has been transferred to a multisig, run
- *     `setPolicyWhitelist` from the multisig instead.
- *   - If exactly one of the two proxy fields is set, the entry is
- *     inconsistent and the script errors out. Fix the registry first.
- *   - If neither is set, the full stack is deployed.
+ *   2. paymentToken filled → use it verbatim
+ *        Commerce:
+ *          - cfg.commerceProxy filled → keep proxy, only deploy new impl +
+ *            upgradeToAndCall(newImpl, "0x")
+ *          - cfg.commerceProxy blank  → deploy fresh Commerce, AND force the
+ *            Router down the fresh path too (see cascade rule below)
+ *        Router (`freshRouter = freshCommerce || !cfg.routerProxy`):
+ *          - cfg.routerProxy filled and Commerce was reused → keep proxy,
+ *            only deploy new impl + upgradeToAndCall
+ *          - else → deploy fresh Router pointing at the Commerce above
+ *
+ * Policy is ALWAYS freshly deployed and whitelisted on the (possibly brand
+ * new) Router. cfg.policy is only used to print a "revoke old policy"
+ * reminder when the Router was reused.
+ *
+ * Cascade rule — why `freshCommerce → freshRouter` is forced:
+ *   Router stores `commerce` in its own storage. If we ever kept the
+ *   Router while swapping Commerce, we'd need `router.setCommerce` which
+ *   requires `router.pause()`, plus careful drainage of in-flight jobs.
+ *   Fresh Router sidesteps all of that. Old Commerce / old Router remain
+ *   on-chain so clients can still call `oldCommerce.claimRefund` after
+ *   expiry.
+ *
+ * Invariants (reuse paths only):
+ *   - commerce.paymentToken() MUST equal cfg.paymentToken. paymentToken is
+ *     immutable on Commerce — a mismatch means cfg is inconsistent.
+ *   - router.commerce() MUST equal the Commerce we're using this run.
+ *   - owner() of both proxies touched MUST equal the deployer signer.
+ *     Once ownership has moved to a multisig this script is no longer the
+ *     right tool — run upgrades + whitelist changes from the multisig.
+ *
+ * Side effects:
+ *   - Never writes to ADDRESSES / scripts/addresses.ts. At the end it prints
+ *     only the fields that changed this run; the operator pastes them back
+ *     manually.
  */
 
-const LIVE_NETWORKS = new Set(["bsc", "bscTestnet"]);
+type AnyViem = Awaited<ReturnType<typeof network.connect>>["viem"];
 
 function env(key: string, fallback?: string): string {
   const v = process.env[key];
@@ -39,30 +60,53 @@ function env(key: string, fallback?: string): string {
   throw new Error(`Missing env var: ${key}`);
 }
 
-async function main() {
+function sameAddr(a: `0x${string}`, b: `0x${string}`): boolean {
+  return getAddress(a) === getAddress(b);
+}
+
+async function assertOwner(
+  label: string,
+  proxy: { read: { owner: () => Promise<`0x${string}`> }; address: `0x${string}` },
+  expected: `0x${string}`,
+): Promise<void> {
+  const actual = await proxy.read.owner();
+  if (!sameAddr(actual, expected)) {
+    throw new Error(
+      `${label} owner mismatch: proxy ${proxy.address} is owned by ${actual}, ` +
+        `but signer is ${expected}. Ownership has likely been transferred to a ` +
+        `multisig — run upgrades / whitelist changes from the multisig instead.`,
+    );
+  }
+}
+
+async function deployAndUpgrade(
+  viem: AnyViem,
+  contractName: "AgenticCommerceUpgradeable" | "EvaluatorRouterUpgradeable",
+  proxy: {
+    write: { upgradeToAndCall: (args: [`0x${string}`, `0x${string}`]) => Promise<`0x${string}`> };
+  },
+): Promise<{ implAddr: `0x${string}`; txHash: `0x${string}` }> {
+  const impl = await viem.deployContract(contractName, []);
+  const txHash = await proxy.write.upgradeToAndCall([impl.address, "0x"]);
+  return { implAddr: impl.address, txHash };
+}
+
+async function main(): Promise<void> {
   const { viem, networkName } = await network.connect();
   const [deployerClient] = await viem.getWalletClients();
   const deployer = getAddress(deployerClient.account.address);
-  const isLive = LIVE_NETWORKS.has(networkName);
 
-  // Reuse semantics: both proxies set → skip steps 2/3; both unset → full
-  // deploy; otherwise the registry is inconsistent and we bail so the
-  // operator doesn't accidentally pair a fresh proxy with a pre-existing
-  // sibling that it can't talk to.
-  const existing = ADDRESSES[networkName];
-  const hasCommerce = !!existing?.commerceProxy;
-  const hasRouter = !!existing?.routerProxy;
-  if (hasCommerce !== hasRouter) {
-    throw new Error(
-      `Inconsistent ADDRESSES["${networkName}"]: commerceProxy and routerProxy ` +
-        `must both be set or both unset. Fix the entry before redeploying.`,
-    );
-  }
-  const reuseStack = hasCommerce && hasRouter;
-
+  const cfg = ADDRESSES[networkName] ?? {};
   const owner = deployer;
   const disputeWindow = BigInt(env("DISPUTE_WINDOW_SECONDS", "86400"));
   const initialQuorum = Number(env("INITIAL_QUORUM", "2"));
+
+  // Cascade rule: blank paymentToken forces a full-stack rotation. Blank
+  // commerceProxy alone also forces a fresh Router so we never end up with
+  // a Router pointing at a stale Commerce.
+  const freshPaymentToken = !cfg.paymentToken;
+  const freshCommerce = freshPaymentToken || !cfg.commerceProxy;
+  const freshRouter = freshCommerce || !cfg.routerProxy;
 
   console.log(`\n=== APEX v1 deploy ===`);
   console.log(`Network : ${networkName}`);
@@ -70,75 +114,113 @@ async function main() {
   console.log(`Owner   : ${owner} (deployer — transfer to multisig after deploy)`);
   console.log(`Window  : ${disputeWindow}s`);
   console.log(`Quorum  : ${initialQuorum}`);
-
-  // 1. Payment token + treasury
-  let paymentToken: `0x${string}`;
-  let treasury: `0x${string}`;
-  if (isLive) {
-    const inputs = getDeployInputs(networkName);
-    paymentToken = inputs.paymentToken;
-    treasury = inputs.treasury;
-    console.log(`\n[1/5] Using configured paymentToken : ${paymentToken}`);
-    console.log(`                 configured treasury : ${treasury}`);
-  } else {
-    console.log(`\n[1/5] Deploying MockERC20 (local network) ...`);
-    const token = await viem.deployContract("MockERC20", ["Apex Test Token", "APT", 18]);
-    paymentToken = token.address;
-    treasury = deployer;
-    await token.write.mint([deployer, parseUnits("1000000", 18)]);
-    console.log(`      token    : ${paymentToken}`);
-    console.log(`      treasury : ${treasury} (deployer)`);
+  console.log(
+    `Plan    : paymentToken=${freshPaymentToken ? "FRESH" : "reuse"}, ` +
+      `commerce=${freshCommerce ? "FRESH" : "upgrade impl"}, ` +
+      `router=${freshRouter ? "FRESH" : "upgrade impl"}, ` +
+      `policy=FRESH`,
+  );
+  if (freshPaymentToken && (cfg.commerceProxy || cfg.routerProxy)) {
+    console.log(
+      `\n⚠ paymentToken is blank → full-stack rotation. cfg.commerceProxy ` +
+        `and cfg.routerProxy will be ignored; the stack you see below becomes ` +
+        `brand new. Old Commerce / Router remain on-chain but leave them out ` +
+        `of the registry going forward.`,
+    );
   }
 
-  // 2. Commerce
-  let commerce: Awaited<ReturnType<typeof viem.getContractAt<"AgenticCommerceUpgradeable">>>;
-  let commerceImplAddr: `0x${string}` | null = null;
-  if (reuseStack) {
-    const proxyAddr = existing!.commerceProxy!;
-    commerce = await viem.getContractAt("AgenticCommerceUpgradeable", proxyAddr);
-    console.log(`\n[2/5] Reusing commerceProxy: ${proxyAddr}`);
+  // 1. paymentToken --------------------------------------------------------
+  let paymentToken: `0x${string}`;
+  if (freshPaymentToken) {
+    console.log(`\n[1/5] paymentToken: deploying MockERC20 ...`);
+    const token = await viem.deployContract("MockERC20", ["Apex Test Token", "APT", 18]);
+    paymentToken = token.address;
+    await token.write.mint([deployer, parseUnits("1000000", 18)]);
+    console.log(`      addr : ${paymentToken} (minted 1,000,000 APT to deployer)`);
   } else {
-    console.log(`\n[2/5] Deploying AgenticCommerceUpgradeable ...`);
-    const commerceImpl = await viem.deployContract("AgenticCommerceUpgradeable", []);
-    const commerceInit = encodeFunctionData({
-      abi: commerceImpl.abi,
+    paymentToken = cfg.paymentToken!;
+    console.log(`\n[1/5] paymentToken (reused): ${paymentToken}`);
+  }
+
+  // 2. treasury ------------------------------------------------------------
+  const treasury = cfg.treasury ?? deployer;
+  console.log(`\n[2/5] treasury: ${treasury}${cfg.treasury ? "" : " (deployer fallback)"}`);
+
+  // 3. Commerce ------------------------------------------------------------
+  let commerce: Awaited<ReturnType<typeof viem.getContractAt<"AgenticCommerceUpgradeable">>>;
+  let commerceImplAddr: `0x${string}`;
+
+  if (freshCommerce) {
+    console.log(`\n[3/5] Commerce: deploying fresh impl + proxy ...`);
+    const impl = await viem.deployContract("AgenticCommerceUpgradeable", []);
+    const initData = encodeFunctionData({
+      abi: impl.abi,
       functionName: "initialize",
       args: [paymentToken, treasury, owner],
     });
-    const commerceProxy = await viem.deployContract("ERC1967Proxy", [
-      commerceImpl.address,
-      commerceInit,
-    ]);
-    commerce = await viem.getContractAt("AgenticCommerceUpgradeable", commerceProxy.address);
-    commerceImplAddr = commerceImpl.address;
-    console.log(`      impl : ${commerceImpl.address}`);
+    const proxy = await viem.deployContract("ERC1967Proxy", [impl.address, initData]);
+    commerce = await viem.getContractAt("AgenticCommerceUpgradeable", proxy.address);
+    commerceImplAddr = impl.address;
+    console.log(`      impl : ${impl.address}`);
     console.log(`      proxy: ${commerce.address}`);
+  } else {
+    commerce = await viem.getContractAt("AgenticCommerceUpgradeable", cfg.commerceProxy!);
+    const onChainPaymentToken = await commerce.read.paymentToken();
+    if (!sameAddr(onChainPaymentToken, paymentToken)) {
+      throw new Error(
+        `paymentToken mismatch on commerceProxy ${commerce.address}: ` +
+          `on-chain ${onChainPaymentToken}, cfg ${paymentToken}. ` +
+          `paymentToken is immutable on Commerce. To rotate, clear paymentToken ` +
+          `in scripts/addresses.ts (the script will then redeploy the full stack).`,
+      );
+    }
+    await assertOwner("commerce", commerce, deployer);
+
+    console.log(`\n[3/5] Commerce: reusing proxy ${commerce.address}`);
+    const up = await deployAndUpgrade(viem, "AgenticCommerceUpgradeable", commerce);
+    commerceImplAddr = up.implAddr;
+    console.log(`      new impl           : ${commerceImplAddr}`);
+    console.log(`      upgradeToAndCall tx: ${up.txHash}`);
   }
 
-  // 3. Router
+  // 4. Router --------------------------------------------------------------
   let router: Awaited<ReturnType<typeof viem.getContractAt<"EvaluatorRouterUpgradeable">>>;
-  let routerImplAddr: `0x${string}` | null = null;
-  if (reuseStack) {
-    const proxyAddr = existing!.routerProxy!;
-    router = await viem.getContractAt("EvaluatorRouterUpgradeable", proxyAddr);
-    console.log(`\n[3/5] Reusing routerProxy: ${proxyAddr}`);
-  } else {
-    console.log(`\n[3/5] Deploying EvaluatorRouterUpgradeable ...`);
-    const routerImpl = await viem.deployContract("EvaluatorRouterUpgradeable", []);
-    const routerInit = encodeFunctionData({
-      abi: routerImpl.abi,
+  let routerImplAddr: `0x${string}`;
+
+  if (freshRouter) {
+    console.log(`\n[4/5] Router: deploying fresh impl + proxy ...`);
+    const impl = await viem.deployContract("EvaluatorRouterUpgradeable", []);
+    const initData = encodeFunctionData({
+      abi: impl.abi,
       functionName: "initialize",
       args: [commerce.address, owner],
     });
-    const routerProxy = await viem.deployContract("ERC1967Proxy", [routerImpl.address, routerInit]);
-    router = await viem.getContractAt("EvaluatorRouterUpgradeable", routerProxy.address);
-    routerImplAddr = routerImpl.address;
-    console.log(`      impl : ${routerImpl.address}`);
+    const proxy = await viem.deployContract("ERC1967Proxy", [impl.address, initData]);
+    router = await viem.getContractAt("EvaluatorRouterUpgradeable", proxy.address);
+    routerImplAddr = impl.address;
+    console.log(`      impl : ${impl.address}`);
     console.log(`      proxy: ${router.address}`);
+  } else {
+    router = await viem.getContractAt("EvaluatorRouterUpgradeable", cfg.routerProxy!);
+    const onChainCommerce = await router.read.commerce();
+    if (!sameAddr(onChainCommerce, commerce.address)) {
+      throw new Error(
+        `router.commerce() = ${onChainCommerce} but this run uses ` +
+          `commerce ${commerce.address}. Fix ADDRESSES["${networkName}"] so ` +
+          `commerceProxy matches the router's stored commerce before redeploying.`,
+      );
+    }
+    await assertOwner("router", router, deployer);
+
+    console.log(`\n[4/5] Router: reusing proxy ${router.address}`);
+    const up = await deployAndUpgrade(viem, "EvaluatorRouterUpgradeable", router);
+    routerImplAddr = up.implAddr;
+    console.log(`      new impl           : ${routerImplAddr}`);
+    console.log(`      upgradeToAndCall tx: ${up.txHash}`);
   }
 
-  // 4. OptimisticPolicy
-  console.log(`\n[4/5] Deploying OptimisticPolicy ...`);
+  // 5. OptimisticPolicy (always fresh) + whitelist -------------------------
+  console.log(`\n[5/5] Policy: deploying fresh OptimisticPolicy + whitelisting ...`);
   const policy = await viem.deployContract("OptimisticPolicy", [
     commerce.address,
     router.address,
@@ -147,41 +229,74 @@ async function main() {
     initialQuorum,
   ]);
   console.log(`      addr : ${policy.address}`);
-
-  // 5. Whitelist the policy. Owner == deployer, so this always runs.
-  console.log(`\n[5/5] Whitelisting policy on router ...`);
   await router.write.setPolicyWhitelist([policy.address, true]);
-  console.log(`      whitelisted`);
+  console.log(`      whitelisted on router ${router.address}`);
 
+  // ----------------------------------------------------------------------
+  // Output
+  // ----------------------------------------------------------------------
   console.log(`\n=== DONE ===\n`);
-  if (isLive) {
-    console.log(`Paste the following under ADDRESSES["${networkName}"] in scripts/addresses.ts:\n`);
-    if (!reuseStack) {
-      console.log(`    commerceProxy: "${commerce.address}",`);
-      console.log(`    routerProxy:   "${router.address}",`);
-    }
-    console.log(`    policy:        "${policy.address}",\n`);
-    if (!reuseStack) {
-      console.log(`Post-deploy ownership handoff (required; ownership is on deployer):`);
-      console.log(`  commerce.transferOwnership(multisig)  → multisig.acceptOwnership()`);
-      console.log(`  router.transferOwnership(multisig)    → multisig.acceptOwnership()`);
-      console.log(`  policy.transferAdmin(multisig)        → multisig.acceptAdmin()\n`);
-    } else {
-      console.log(`Transfer admin of the fresh policy to the multisig when ready:`);
-      console.log(`  policy.transferAdmin(multisig)        → multisig.acceptAdmin()\n`);
-    }
-  } else {
-    console.log(`Fund a test recipient (replace 0xYourAddr; pass env inline, do NOT edit .env):\n`);
+
+  console.log(`Paste the following into ADDRESSES["${networkName}"] in scripts/addresses.ts`);
+  console.log(`(only the fields that changed this run are listed):\n`);
+  if (freshPaymentToken) console.log(`    paymentToken:  "${paymentToken}",`);
+  if (freshCommerce) console.log(`    commerceProxy: "${commerce.address}",`);
+  if (freshRouter) console.log(`    routerProxy:   "${router.address}",`);
+  console.log(`    policy:        "${policy.address}",`);
+  console.log(``);
+
+  // Warnings for superseded on-chain state.
+  if (freshPaymentToken && cfg.paymentToken) {
+    console.log(`⚠ Old paymentToken (${cfg.paymentToken}) is deprecated.`);
+  }
+  if (freshCommerce && cfg.commerceProxy) {
+    console.log(`⚠ Old Commerce (${cfg.commerceProxy}) still holds any in-flight escrow.`);
+    console.log(`  Clients must call oldCommerce.claimRefund(jobId) after expiredAt.`);
+    console.log(`  Consider oldCommerce.pause() via the old owner to block new jobs.`);
+  }
+  if (freshRouter && cfg.routerProxy) {
+    console.log(`⚠ Old Router (${cfg.routerProxy}) is now orphaned but still on-chain.`);
     console.log(
-      `  FUND_RECIPIENT=0xYourAddr FUND_TOKEN_ADDRESS=${paymentToken} bun run fund:local\n`,
+      `  Any jobs created against it continue to route through it until settled/expired.`,
     );
   }
-  if (commerceImplAddr || routerImplAddr) {
-    console.log(`Implementation addresses (for Etherscan verify only, not persisted):`);
-    if (commerceImplAddr) console.log(`  commerceImpl: ${commerceImplAddr}`);
-    if (routerImplAddr) console.log(`  routerImpl  : ${routerImplAddr}`);
-    console.log("");
+  if (!freshRouter && cfg.policy) {
+    console.log(`⚠ Old policy (${cfg.policy}) is still whitelisted on the router.`);
+    console.log(`  Revoke via the current router owner:`);
+    console.log(`    router.setPolicyWhitelist(${cfg.policy}, false)`);
   }
+  if (freshPaymentToken || freshCommerce || freshRouter || (!freshRouter && cfg.policy)) {
+    console.log(``);
+  }
+
+  // Ownership handoff reminder.
+  const freshProxyDeployed = freshCommerce || freshRouter;
+  if (freshProxyDeployed) {
+    console.log(`Post-deploy ownership handoff (required; ownership is on deployer):`);
+    if (freshCommerce)
+      console.log(`  commerce.transferOwnership(multisig)  → multisig.acceptOwnership()`);
+    if (freshRouter)
+      console.log(`  router.transferOwnership(multisig)    → multisig.acceptOwnership()`);
+    console.log(`  policy.transferAdmin(multisig)        → multisig.acceptAdmin()`);
+    console.log(``);
+  } else {
+    console.log(`Transfer admin of the fresh policy when ready:`);
+    console.log(`  policy.transferAdmin(multisig)        → multisig.acceptAdmin()`);
+    console.log(``);
+  }
+
+  if (freshPaymentToken) {
+    console.log(`Fund a test recipient (pass env inline, do NOT edit .env):`);
+    console.log(
+      `  FUND_RECIPIENT=0xYourAddr FUND_TOKEN_ADDRESS=${paymentToken} bun run fund:local`,
+    );
+    console.log(``);
+  }
+
+  console.log(`Implementation addresses (for Etherscan verify only, not persisted):`);
+  console.log(`  commerceImpl: ${commerceImplAddr}`);
+  console.log(`  routerImpl  : ${routerImplAddr}`);
+  console.log(``);
 }
 
 main().catch((err) => {

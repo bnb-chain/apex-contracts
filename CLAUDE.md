@@ -36,9 +36,7 @@ contracts/
     AgenticCommerceV2Mock.sol      # UUPS upgrade target for commerce
     EvaluatorRouterV2Mock.sol      # UUPS upgrade target for router
 scripts/
-  deploy.ts                        # One-shot stack deployment (print-only; no file side-effects)
-  upgrade-commerce.ts              # Upgrade kernel impl
-  upgrade-router.ts                # Upgrade router impl (emergency only)
+  deploy.ts                        # Unified deploy / impl upgrade / policy rotation (print-only; no file side-effects)
   addresses.ts                     # Hand-committed registry of deployed proxy/policy addresses
 test/
   helpers.ts                       # Shared test fixtures
@@ -89,12 +87,9 @@ bun run node                      # == bunx hardhat node
 bun run deploy:local              # Uses .env; deploys stack to localhost
 bun run fund:local                # Sends ETH + MockERC20 to FUND_RECIPIENT
 
-# Deployment (BSC Testnet)
+# Deployment (BSC Testnet) — same script handles first deploy, impl upgrade,
+# and policy rotation (decided per-field from scripts/addresses.ts)
 bun run deploy:testnet            # Uses .env.testnet
-
-# Upgrades (ownership MUST be multisig + TimelockController on production)
-bun run upgrade:commerce:testnet
-bun run upgrade:router:testnet
 
 # Verification (manual)
 bunx hardhat verify --network bscTestnet <impl_address>

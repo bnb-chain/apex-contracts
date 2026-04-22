@@ -13,8 +13,6 @@
     "e2e:testnet": "DOTENV_CONFIG_PATH=.env.testnet bunx hardhat run test/e2e/runner.ts --network bscTestnet",
     "deploy:local": "bunx hardhat run scripts/deploy.ts --network localhost",
     "deploy:testnet": "DOTENV_CONFIG_PATH=.env.testnet bunx hardhat run scripts/deploy.ts --network bscTestnet",
-    "upgrade:commerce:testnet": "DOTENV_CONFIG_PATH=.env.testnet bunx hardhat run scripts/upgrade-commerce.ts --network bscTestnet",
-    "upgrade:router:testnet": "DOTENV_CONFIG_PATH=.env.testnet bunx hardhat run scripts/upgrade-router.ts --network bscTestnet",
     "fund:local": "bunx hardhat run scripts/fund-local.ts --network localhost",
     "node": "bunx hardhat node",
     "lint:sol": "bunx solhint 'contracts/**/*.sol'",

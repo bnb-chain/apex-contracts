@@ -53,9 +53,7 @@ contracts/
     AgenticCommerceV2Mock.sol      UUPS upgrade target for commerce tests
     EvaluatorRouterV2Mock.sol      UUPS upgrade target for router tests
 scripts/
-  deploy.ts                        One-shot stack deployment
-  upgrade-commerce.ts              Upgrade the kernel impl
-  upgrade-router.ts                Upgrade the router impl (emergency only)
+  deploy.ts                        One-shot stack deploy / impl upgrade / policy refresh
   addresses.ts                     Hand-committed registry of deployed addresses
 test/
   unit/                            Unit tests (run by `bun test`)
@@ -123,9 +121,8 @@ balance + key matrix.
 
 ### Deploy to BSC Testnet / Mainnet
 
-Prerequisite — fill the pre-deploy inputs in
-[`scripts/addresses.ts`](./scripts/addresses.ts) for the target network, then
-commit:
+Optionally pre-fill inputs in [`scripts/addresses.ts`](./scripts/addresses.ts)
+for the target network:
 
 ```ts
 export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
@@ -137,6 +134,18 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
 };
 ```
 
+Every field is optional. `deploy.ts` reads the entry top-to-bottom with one
+cascading rule: **blank `paymentToken` triggers a full-stack rotation.** The
+rest of the fields decide reuse-vs-deploy independently:
+
+| Field           | Filled → reuse                                                                          | Blank → deploy                                                                                                                                |
+| --------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `paymentToken`  | use that ERC-20                                                                         | deploy fresh `MockERC20` **and** force fresh Commerce + Router + Policy (cascade; `commerceProxy` / `routerProxy` are ignored in this branch) |
+| `treasury`      | passed into `commerce.initialize` on fresh path; logged only on reuse path              | fall back to the deployer                                                                                                                     |
+| `commerceProxy` | keep proxy; deploy new impl + signed `upgradeToAndCall`                                 | deploy fresh impl + `ERC1967Proxy` + `initialize` **and** force fresh Router (so it doesn't dangle)                                           |
+| `routerProxy`   | keep proxy; deploy new impl + signed `upgradeToAndCall` (requires Commerce was reused)  | deploy fresh impl + `ERC1967Proxy` + `initialize`                                                                                             |
+| `policy`        | (always rotated; the stored value is only used to print a "revoke old policy" reminder) | always freshly deployed + whitelisted                                                                                                         |
+
 Then:
 
 ```bash
@@ -145,27 +154,29 @@ cp .env.example .env.testnet
 bun run deploy:testnet
 ```
 
-Ownership is always the **deployer** at deploy time. Paste the printed
-`commerceProxy` / `routerProxy` / `policy` block back into the same
-`ADDRESSES` entry and commit.
+`deploy.ts` prints a block of `0x…` values; paste the ones it emits under the
+same `ADDRESSES` entry and commit. Subsequent runs will reuse them. The same
+command handles first deploys, impl upgrades, and full-stack rotations —
+there is no separate `upgrade:*` script.
 
-Re-running `deploy:<env>`:
+The reuse paths of `commerceProxy` / `routerProxy` require the signer to
+still be the **owner** of both proxies — `upgradeToAndCall` and
+`setPolicyWhitelist` are owner-gated, and `deploy.ts` pre-checks `owner()`
+on both proxies before touching them. Once ownership has been transferred
+to the production multisig, run impl upgrades and policy rotations from the
+multisig directly.
 
-- **Both `commerceProxy` and `routerProxy` already set** → the script reuses
-  the existing proxies and only deploys + whitelists a fresh `OptimisticPolicy`.
-  Paste the new `policy` line back into `ADDRESSES`. This path requires the
-  router owner to still be the deployer; once ownership has been transferred
-  to the multisig, whitelist new policies from the multisig instead.
-- **Only one of the two is set** → the entry is inconsistent and the script
-  errors out. Fix the registry first.
-- **Neither is set** → full stack is deployed; use
-  `bun run upgrade:commerce:<env>` / `bun run upgrade:router:<env>` afterwards
-  to upgrade impls in place.
+### Rotating `paymentToken`
 
-Upgrade scripts import addresses directly from `scripts/addresses.ts`, so
-they run with zero parameters. Each run always deploys a fresh impl and
-calls `upgradeToAndCall`, so only run them when the Solidity source
-actually changed.
+`paymentToken` is set in `commerce.initialize` and has no setter. To rotate
+it, **clear `paymentToken` in `scripts/addresses.ts`** and re-run
+`bun run deploy:<env>`. The script deploys a brand-new MockERC20 (or you
+can paste the new real token address in first), plus fresh Commerce + Router
+
+- Policy. The old Commerce / Router remain on-chain; any in-flight jobs
+  against the old Commerce must drain via
+  `oldCommerce.claimRefund(jobId)` after expiry (`claimRefund` is never
+  pausable nor hookable).
 
 ### Post-deploy ownership transfer
 
