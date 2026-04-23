@@ -80,7 +80,7 @@ contract AgenticCommerceUpgradeable is
     );
     event ProviderSet(uint256 indexed jobId, address indexed provider);
     event BudgetSet(uint256 indexed jobId, uint256 amount);
-    event JobFunded(uint256 indexed jobId, address indexed client, address indexed provider, uint256 amount);
+    event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
     event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
@@ -305,7 +305,7 @@ contract AgenticCommerceUpgradeable is
         IERC20(paymentToken).safeTransferFrom(job.client, address(this), job.budget);
         _afterHook(job.hook, jobId, this.fund.selector, optParams);
 
-        emit JobFunded(jobId, job.client, job.provider, job.budget);
+        emit JobFunded(jobId, job.client, job.budget);
     }
 
     /// @notice Provider submits the deliverable hash, moving the job to the

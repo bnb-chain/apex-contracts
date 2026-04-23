@@ -242,9 +242,10 @@ expectedBudget` as front-running protection.
     the universal escape hatch.
   - Hook dispatch goes through `HOOK_GAS_LIMIT = 1_000_000` and verifies
     `IACPHook` via ERC-165 at `createJob` time.
-- **Events:** aligned with the ERC-8183 standard set. Our `JobFunded`
-  carries an extra `provider` field (non-breaking extension of the spec's
-  "SHOULD emit at least" events).
+- **Events:** aligned with the ERC-8183 standard set. Event signatures
+  match the normative spec except `JobCreated`, which appends a
+  non-indexed `hook` address (matching the ERC reference implementation
+  so that ref-impl-ABI indexers stay compatible).
 - **Admin:** `setPlatformFee(feeBP, treasury)`, `pause`, `unpause`.
 - **Not implemented (intentional):** `fundWithPermit`, ERC-2771
   meta-transactions, `AccessControl` multi-role (we use `Ownable2Step`),
