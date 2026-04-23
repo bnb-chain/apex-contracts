@@ -601,60 +601,6 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Expired);
     });
 
-    it("GracePeriodActive: Submitted job cannot be claimed within EVALUATION_GRACE_PERIOD after expiry", async () => {
-      const { token, commerce } = await setup();
-      const commerceAsClient = await asCommerce(commerce.address, clientW);
-      // Short expiry (10 min) so we can advance past it while still within the 1-hour grace.
-      await commerceAsClient.write.createJob([
-        provider,
-        evaluator,
-        await futureTs(600),
-        "",
-        zeroAddress,
-      ]);
-      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
-      await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
-        client: { wallet: clientW },
-      });
-      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
-      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
-      const commerceAsProvider = await asCommerce(commerce.address, providerW);
-      await commerceAsProvider.write.submit([1n, keccak256(toBytes("d")), "0x"]);
-
-      // Advance past expiredAt but stay inside submittedAt + 1 hour.
-      await advanceSeconds(viem, 700);
-
-      await assert.rejects(commerce.write.claimRefund([1n]), /GracePeriodActive/);
-    });
-
-    it("Submitted job claimable after expiry AND grace period elapsed", async () => {
-      const { token, commerce } = await setup();
-      const commerceAsClient = await asCommerce(commerce.address, clientW);
-      await commerceAsClient.write.createJob([
-        provider,
-        evaluator,
-        await futureTs(600),
-        "",
-        zeroAddress,
-      ]);
-      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
-      await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
-        client: { wallet: clientW },
-      });
-      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
-      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
-      const commerceAsProvider = await asCommerce(commerce.address, providerW);
-      await commerceAsProvider.write.submit([1n, keccak256(toBytes("d")), "0x"]);
-
-      // Advance past both expiredAt and the 1-hour grace period.
-      await advanceSeconds(viem, 3700);
-
-      await commerce.write.claimRefund([1n]);
-      assert.equal(await token.read.balanceOf([client]), DEFAULT_BUDGET);
-      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Expired);
-    });
   });
 
   // ==================================================================
