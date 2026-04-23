@@ -69,6 +69,7 @@ test/
 docs/
   design.md                        Canonical design document
   erc-8183-compliance.md           ERC-8183 compliance matrix + change log
+  custom-policy.md                 How to author a new IPolicy implementation
 ```
 
 ## Getting started
@@ -236,4 +237,4 @@ See `docs/design.md §5 Contract Details` and `§6 Risks` for the full list.
 - `OptimisticPolicy` enforces `voteQuorum ≤ activeVoterCount` bidirectionally
   (`setQuorum` and `removeVoter` can both revert to maintain the invariant).
 
-Please report vulnerabilities privately to `security@apex.example`.
+Please report vulnerabilities through the [BNB Chain Bug Bounty Program](https://bugbounty.bnbchain.org/).

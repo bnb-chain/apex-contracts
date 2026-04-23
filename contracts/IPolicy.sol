@@ -13,7 +13,16 @@ interface IPolicy {
     ///         or revert on second call.
     /// @param jobId        Kernel job id.
     /// @param deliverable  Deliverable hash forwarded from the kernel event.
-    function onSubmitted(uint256 jobId, bytes32 deliverable) external;
+    /// @param optParams    Provider-supplied opaque payload from `submit`'s
+    ///                     `optParams` (raw bytes, unbounded length).
+    ///                     ERC-8183 explicitly forbids the kernel from
+    ///                     interpreting these bytes; the Router transports
+    ///                     them unchanged so policies MAY bind extra
+    ///                     commitments (URI, manifest hash, ZK inputs, etc.)
+    ///                     without requiring a Router upgrade. Policies that
+    ///                     do not need it MUST ignore the argument and SHOULD
+    ///                     NOT persist it to storage.
+    function onSubmitted(uint256 jobId, bytes32 deliverable, bytes calldata optParams) external;
 
     /// @notice Returns the current verdict for `jobId`.
     /// @dev    MUST be `view`. Router calls this from `settle`.

@@ -169,7 +169,15 @@ contract OptimisticPolicy is IPolicy {
     // ---------------------------------------------------------------
 
     /// @inheritdoc IPolicy
-    function onSubmitted(uint256 jobId, bytes32 deliverable) external override onlyRouter {
+    /// @dev `optParams` is accepted for interface compatibility but not used
+    ///      by the optimistic policy. It is intentionally not persisted to
+    ///      storage to keep the policy gas-neutral versus the pre-passthrough
+    ///      implementation.
+    function onSubmitted(
+        uint256 jobId,
+        bytes32 deliverable,
+        bytes calldata /* optParams */
+    ) external override onlyRouter {
         if (submittedAt[jobId] != 0) revert AlreadyInitialised();
         uint64 ts = uint64(block.timestamp);
         submittedAt[jobId] = ts;

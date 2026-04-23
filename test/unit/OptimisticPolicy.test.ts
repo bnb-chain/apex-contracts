@@ -112,7 +112,10 @@ describe("OptimisticPolicy", async () => {
   describe("onSubmitted", () => {
     it("only router can call", async () => {
       const { policy } = await setup();
-      await assert.rejects(policy.write.onSubmitted([1n, keccak256(toBytes("x"))]), /NotRouter/);
+      await assert.rejects(
+        policy.write.onSubmitted([1n, keccak256(toBytes("x")), "0x"]),
+        /NotRouter/,
+      );
     });
 
     it("records submittedAt on first-and-only call (via real submit)", async () => {
@@ -294,14 +297,24 @@ describe("OptimisticPolicy", async () => {
       const policyAsV1 = await asPolicy(ctx.policy.address, voter1W);
       const tx1 = await policyAsV1.write.voteReject([jobId]);
       const receipt1 = await publicClient.waitForTransactionReceipt({ hash: tx1 });
-      const qr1 = parseEventLogs({ abi: ctx.policy.abi, logs: receipt1.logs, eventName: "QuorumReached" });
+      const qr1 = parseEventLogs({
+        abi: ctx.policy.abi,
+        logs: receipt1.logs,
+        eventName: "QuorumReached",
+      });
       assert.equal(qr1.length, 0, "QuorumReached should not fire below quorum");
 
       // Second vote (2 == quorum): QuorumReached fired
       const policyAsV2 = await asPolicy(ctx.policy.address, voter2W);
       const tx2 = await policyAsV2.write.voteReject([jobId]);
       const receipt2 = await publicClient.waitForTransactionReceipt({ hash: tx2 });
-      const qr2 = parseEventLogs({ abi: ctx.policy.abi, logs: receipt2.logs, eventName: "QuorumReached" });
+      const qr2 = parseEventLogs({
+        abi: ctx.policy.abi,
+        logs: receipt2.logs,
+        eventName: "QuorumReached",
+      }) as unknown as Array<{
+        args: { jobId: bigint; rejectVotes: number };
+      }>;
       assert.equal(qr2.length, 1);
       assert.equal(qr2[0].args.jobId, jobId);
       assert.equal(qr2[0].args.rejectVotes, 2);

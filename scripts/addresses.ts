@@ -52,7 +52,7 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
     treasury: "0x1001b2C085345f388778A975648aA50bcfd0D134",
     commerceProxy: "0x1e677fc06ff772e81051484c8c3845fbef13986d",
     routerProxy: "0x0c729baa3cdac6cc3fdef6a816f6bcb85ae92ed7",
-    policy: "0x459c3b7a46aa9dde45fbfc3b3d37bd062dbe6fb8",
+    policy: "0xca649363c196afb19ec255610c4dc81a0042a457",
   },
   // bsc: {
   //   paymentToken: "0x...", // e.g. USDC on BSC Mainnet
