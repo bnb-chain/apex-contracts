@@ -22,7 +22,7 @@ import {IPolicy} from "./IPolicy.sol";
 ///      hook for every routed job. Upgrade governance MUST be a multisig
 ///      behind a TimelockController; the operational default is NEVER UPGRADE.
 ///
-/// @custom:security-contact security@apex.example
+/// @custom:security-contact https://bugbounty.bnbchain.org/
 contract EvaluatorRouterUpgradeable is
     Initializable,
     Ownable2StepUpgradeable,
@@ -264,6 +264,10 @@ contract EvaluatorRouterUpgradeable is
     /// @notice ERC-8183 hook invoked after every mutating kernel action.
     /// @dev    On `SUBMIT` the Router forwards a one-shot notification to the
     ///         registered policy so time-sensitive state can be initialised.
+    ///         Both the 32-byte `deliverable` and the provider's opaque
+    ///         `optParams` are transported unchanged so policies can bind
+    ///         extra commitments (URI, manifest hash, ZK public inputs, ...)
+    ///         without requiring a Router upgrade.
     ///         NOT `nonReentrant` (see {beforeAction}).
     function afterAction(uint256 jobId, bytes4 selector, bytes calldata data) external override {
         RouterStorage storage $ = _router();
@@ -272,8 +276,8 @@ contract EvaluatorRouterUpgradeable is
         if (selector == SUBMIT_SELECTOR) {
             address policy = $.jobPolicy[jobId];
             if (policy == address(0)) revert PolicyNotSet();
-            (bytes32 deliverable, ) = abi.decode(data, (bytes32, bytes));
-            IPolicy(policy).onSubmitted(jobId, deliverable);
+            (bytes32 deliverable, bytes memory optParams) = abi.decode(data, (bytes32, bytes));
+            IPolicy(policy).onSubmitted(jobId, deliverable, optParams);
         }
     }
 

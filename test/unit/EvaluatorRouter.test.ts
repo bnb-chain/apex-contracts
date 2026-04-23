@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { encodeAbiParameters, getAddress, keccak256, parseAbiParameters, parseEventLogs, toBytes, zeroAddress } from "viem";
+import {
+  encodeAbiParameters,
+  getAddress,
+  keccak256,
+  parseAbiParameters,
+  parseEventLogs,
+  toBytes,
+  zeroAddress,
+} from "viem";
 
 import {
   JobStatus,
@@ -246,6 +254,84 @@ describe("EvaluatorRouterUpgradeable", async () => {
   // settle
   // ==================================================================
 
+  // ==================================================================
+  // afterAction(SUBMIT) transports `optParams` unchanged to the policy
+  // ==================================================================
+
+  describe("afterAction(SUBMIT) optParams transport", () => {
+    it("forwards the provider's optParams bytes verbatim to policy.onSubmitted", async () => {
+      const ctx = await setup();
+
+      // Whitelist a recording mock policy alongside the real OptimisticPolicy.
+      const zeroReason = ("0x" + "00".repeat(32)) as `0x${string}`;
+      const recorder = await viem.deployContract("RecordingPolicyMock", [0, zeroReason]);
+      await ctx.router.write.setPolicyWhitelist([recorder.address, true]);
+
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        ctx.router.address,
+        await futureTs(3600),
+        "optParams transport job",
+        ctx.router.address,
+      ]);
+      const jobId = 1n;
+
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
+      await routerAsClient.write.registerJob([jobId, recorder.address]);
+
+      await commerceAsClient.write.setBudget([jobId, DEFAULT_BUDGET, "0x"]);
+      await ctx.token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await asToken(ctx.token.address, clientW);
+      await tokenAsClient.write.approve([ctx.commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([jobId, DEFAULT_BUDGET, "0x"]);
+
+      const deliverable = keccak256(toBytes("transport-deliverable"));
+      // A non-trivial optParams payload: longer than 32 bytes, arbitrary content.
+      const optParams = ("0x" + "deadbeef".repeat(16)) as `0x${string}`;
+
+      const commerceAsProvider = await asCommerce(ctx.commerce.address, providerW);
+      await commerceAsProvider.write.submit([jobId, deliverable, optParams]);
+
+      assert.equal(await recorder.read.onSubmittedCalls(), 1n);
+      assert.equal(await recorder.read.lastJobId(), jobId);
+      assert.equal(await recorder.read.lastDeliverable(), deliverable);
+      assert.equal((await recorder.read.lastOptParams()).toLowerCase(), optParams.toLowerCase());
+    });
+
+    it("forwards empty optParams as empty bytes", async () => {
+      const ctx = await setup();
+      const zeroReason = ("0x" + "00".repeat(32)) as `0x${string}`;
+      const recorder = await viem.deployContract("RecordingPolicyMock", [0, zeroReason]);
+      await ctx.router.write.setPolicyWhitelist([recorder.address, true]);
+
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        ctx.router.address,
+        await futureTs(3600),
+        "",
+        ctx.router.address,
+      ]);
+      const jobId = 1n;
+
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
+      await routerAsClient.write.registerJob([jobId, recorder.address]);
+      await commerceAsClient.write.setBudget([jobId, DEFAULT_BUDGET, "0x"]);
+      await ctx.token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await asToken(ctx.token.address, clientW);
+      await tokenAsClient.write.approve([ctx.commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([jobId, DEFAULT_BUDGET, "0x"]);
+
+      const deliverable = keccak256(toBytes("empty-optparams"));
+      const commerceAsProvider = await asCommerce(ctx.commerce.address, providerW);
+      await commerceAsProvider.write.submit([jobId, deliverable, "0x"]);
+
+      assert.equal(await recorder.read.onSubmittedCalls(), 1n);
+      assert.equal(await recorder.read.lastOptParams(), "0x");
+    });
+  });
+
   describe("settle", () => {
     it("reverts PolicyNotSet when jobId has no binding", async () => {
       const { router } = await setup();
@@ -264,7 +350,18 @@ describe("EvaluatorRouterUpgradeable", async () => {
       const txHash = await ctx.router.write.settle([jobId, "0x"]);
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-      const settled = parseEventLogs({ abi: ctx.router.abi, logs: receipt.logs, eventName: "JobSettled" });
+      const settled = parseEventLogs({
+        abi: ctx.router.abi,
+        logs: receipt.logs,
+        eventName: "JobSettled",
+      }) as unknown as Array<{
+        args: {
+          jobId: bigint;
+          policy: `0x${string}`;
+          verdict: number;
+          reason: `0x${string}`;
+        };
+      }>;
       assert.equal(settled.length, 1);
       const ev = settled[0].args;
       assert.equal(ev.jobId, jobId);
@@ -300,7 +397,13 @@ describe("EvaluatorRouterUpgradeable", async () => {
         abi: ctx.commerce.abi,
         logs: receipt.logs,
         eventName: "JobCompleted",
-      });
+      }) as unknown as Array<{
+        args: {
+          jobId: bigint;
+          evaluator: `0x${string}`;
+          reason: `0x${string}`;
+        };
+      }>;
       assert.equal(completed.length, 1);
       assert.equal(completed[0].args.reason, wrappedReason);
     });

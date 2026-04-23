@@ -1,6 +1,6 @@
 # APEX v1 · Design
 
-> Status: DRAFT · Author: Declan · Last updated: 2026-04-22
+> Status: DRAFT · Author: BNB Chain · Last updated: 2026-04-22
 >
 > Authoritative design document for APEX v1. It reflects the current
 > on-chain code and is updated whenever behaviour changes. ERC-8183
@@ -52,7 +52,7 @@ Three decoupled layers:
                 ▼
 ┌────────────────────────────────────────────────────────┐
 │ IPolicy                                                │
-│  - onSubmitted(jobId, deliverable)                     │
+│  - onSubmitted(jobId, deliverable, optParams)          │
 │  - check(jobId, evidence) → (verdict, reason)          │
 └───────────────┬────────────────────────────────────────┘
                 │ implemented by
@@ -135,9 +135,9 @@ Day 0  │ Client
        │   └─ commerce.fund(jobId, 100, "")                      [Funded]
        │
 Day 1  │ Provider
-       │   └─ commerce.submit(jobId, deliverableHash, "")
+       │   └─ commerce.submit(jobId, deliverableHash, optParams)
        │        ├─ commerce → router.afterAction(SUBMIT)
-       │        └─ router   → policy.onSubmitted(jobId, deliverable)
+       │        └─ router   → policy.onSubmitted(jobId, deliverable, optParams)
        │             └─ submittedAt[jobId] = Day 1               [Submitted]
        │
 Day 1-4│ Client inspects the deliverable and takes no action
@@ -293,8 +293,11 @@ expectedBudget` as front-running protection.
     the reentrant path `settle → commerce.complete → router.afterAction`.
   - `afterAction(jobId, selector, data)` — `IACPHook`. Requires
     `msg.sender == commerce`. On `submit` selector, decodes
-    `(bytes32 deliverable, bytes)` and forwards to
-    `policy.onSubmitted(jobId, deliverable)`. Other selectors: noop.
+    `(bytes32 deliverable, bytes optParams)` and forwards both verbatim
+    to `policy.onSubmitted(jobId, deliverable, optParams)`. The Router
+    does NOT interpret `optParams` — it is transported so policies can
+    bind extra commitments (URI, manifest hash, ZK public inputs, ...)
+    without a Router upgrade. Other selectors: noop.
     Same `nonReentrant` rationale.
   - `supportsInterface` — declares `IACPHook` and `IERC165`.
 - **Admin:**
@@ -322,9 +325,11 @@ expectedBudget` as front-running protection.
 - **Voter whitelist:** `mapping(address => bool) isVoter` with
   `uint16 activeVoterCount`.
 - **Functions:**
-  - `onSubmitted(jobId, deliverable)` — router-only. `submittedAt[jobId]`
-    is recorded on first call; a second call reverts
-    (`AlreadyInitialised`).
+  - `onSubmitted(jobId, deliverable, optParams)` — router-only.
+    `submittedAt[jobId]` is recorded on first call; a second call
+    reverts (`AlreadyInitialised`). `optParams` is accepted for
+    `IPolicy` compatibility and intentionally ignored by the optimistic
+    policy (not persisted to storage).
   - `dispute(jobId)` — reads `commerce.getJob(jobId)` and requires the
     caller to be `job.client`. Reverts if `submittedAt == 0`
     (`NotSubmitted`), if already disputed (`AlreadyDisputed`), or if the
@@ -374,7 +379,7 @@ Declares:
 
 ```solidity
 interface IPolicy {
-  function onSubmitted(uint256 jobId, bytes32 deliverable) external;
+  function onSubmitted(uint256 jobId, bytes32 deliverable, bytes calldata optParams) external;
   function check(
     uint256 jobId,
     bytes calldata evidence
@@ -387,6 +392,10 @@ Verdict values:
 - `0` = Pending (no action; Router reverts with `NotDecided`).
 - `1` = Approve (Router calls `Commerce.complete`).
 - `2` = Reject (Router calls `Commerce.reject`).
+
+For a walk-through on authoring a new `IPolicy` implementation — required
+invariants, worked example, deployment + whitelisting flow — see
+`docs/custom-policy.md`.
 
 ### 5.6 · `IACPHook.sol`
 
