@@ -43,6 +43,8 @@ export type DeployedAddresses = {
   readonly commerceProxy?: `0x${string}`;
   readonly routerProxy?: `0x${string}`;
   readonly policy?: `0x${string}`;
+  readonly timelockProxy?: `0x${string}`;
+  readonly multisig?: `0x${string}`;
 };
 
 export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
