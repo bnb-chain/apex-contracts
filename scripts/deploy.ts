@@ -8,7 +8,7 @@ import { ADDRESSES } from "./addresses.js";
  * Two cascading triggers decide what gets (re)built, in this order:
  *
  *   1. paymentToken blank in ADDRESSES[network]
- *        → deploy fresh MockERC20
+ *        → deploy fresh ERC20MinimalMock
  *        → deploy fresh Commerce (new proxy) using that token
  *        → deploy fresh Router (new proxy) pointing at that new Commerce
  *        (cfg.commerceProxy / cfg.routerProxy are IGNORED in this branch;
@@ -132,8 +132,8 @@ async function main(): Promise<void> {
   // 1. paymentToken --------------------------------------------------------
   let paymentToken: `0x${string}`;
   if (freshPaymentToken) {
-    console.log(`\n[1/5] paymentToken: deploying MockERC20 ...`);
-    const token = await viem.deployContract("MockERC20", ["Apex Test Token", "APT", 18]);
+    console.log(`\n[1/5] paymentToken: deploying ERC20MinimalMock ...`);
+    const token = await viem.deployContract("ERC20MinimalMock", ["Apex Test Token", "APT", 18]);
     paymentToken = token.address;
     await token.write.mint([deployer, parseUnits("1000000", 18)]);
     console.log(`      addr : ${paymentToken} (minted 1,000,000 APT to deployer)`);

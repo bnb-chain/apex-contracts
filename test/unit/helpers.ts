@@ -31,10 +31,10 @@ export const ZERO_BYTES32 =
   "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 
 /**
- * Deploy a fresh MockERC20 with 18 decimals.
+ * Deploy a fresh ERC20MinimalMock with 18 decimals.
  */
 export async function deployMockToken(viem: any) {
-  return viem.deployContract("MockERC20", ["Test Token", "TEST", 18]);
+  return viem.deployContract("ERC20MinimalMock", ["Test Token", "TEST", 18]);
 }
 
 /**
@@ -208,7 +208,7 @@ export async function createFundedSubmittedJob(
   await commerceAsClient.write.setBudget([jobId, budget, "0x"]);
 
   await ctx.token.write.mint([clientAddr, budget]);
-  const tokenAsClient = await viem.getContractAt("MockERC20", ctx.token.address, {
+  const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", ctx.token.address, {
     client: { wallet: ctx.client },
   });
   await tokenAsClient.write.approve([ctx.commerce.address, budget]);

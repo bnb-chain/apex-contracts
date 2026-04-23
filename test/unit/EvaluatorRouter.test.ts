@@ -39,7 +39,7 @@ describe("EvaluatorRouterUpgradeable", async () => {
     return viem.getContractAt("EvaluatorRouterUpgradeable", addr, { client: { wallet } });
   }
   async function asToken(addr: `0x${string}`, wallet: any) {
-    return viem.getContractAt("MockERC20", addr, { client: { wallet } });
+    return viem.getContractAt("ERC20MinimalMock", addr, { client: { wallet } });
   }
 
   // ==================================================================

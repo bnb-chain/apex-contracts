@@ -60,7 +60,7 @@ describe("UUPS upgrades", async () => {
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
         client: { wallet: clientW },
       });
       await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);

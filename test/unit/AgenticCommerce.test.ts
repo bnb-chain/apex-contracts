@@ -154,7 +154,7 @@ describe("AgenticCommerceUpgradeable", async () => {
     it("rejects a hook that does not implement IACPHook", async () => {
       const { token, commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
-      // MockERC20 does not implement IACPHook.
+      // ERC20MinimalMock does not implement IACPHook.
       await assert.rejects(
         commerceAsClient.write.createJob([
           provider,
@@ -296,7 +296,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
         client: { wallet: clientW },
       });
       await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
@@ -356,7 +356,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", zeroAddress]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
         client: { wallet: clientW },
       });
       await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
@@ -383,7 +383,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
         client: { wallet: clientW },
       });
       await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
@@ -441,7 +441,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
         client: { wallet: clientW },
       });
       await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
@@ -507,7 +507,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
 
       await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
         client: { wallet: clientW },
       });
       await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
@@ -535,7 +535,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
         client: { wallet: clientW },
       });
       await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
@@ -557,7 +557,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
-      const tokenAsClient = await viem.getContractAt("MockERC20", token.address, {
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
         client: { wallet: clientW },
       });
       await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);

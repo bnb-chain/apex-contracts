@@ -1,7 +1,7 @@
 /**
  * Builds the runtime context for an E2E run.
  *
- *  - local   → fresh MockERC20 + Commerce proxy + Router proxy + Policy, all
+ *  - local   → fresh ERC20MinimalMock + Commerce proxy + Router proxy + Policy, all
  *              tied to Hardhat's prefunded accounts.
  *  - testnet → reuse the live Commerce + Router proxies from
  *              `scripts/addresses.ts`; deploy a fresh short-window Policy,
@@ -61,8 +61,8 @@ async function buildLocalContext(
 
   log.header("Local deploy");
 
-  const token = await viem.deployContract("MockERC20", ["E2E Token", "E2E", 18], withOwner);
-  log.info(`MockERC20 : ${token.address}`);
+  const token = await viem.deployContract("ERC20MinimalMock", ["E2E Token", "E2E", 18], withOwner);
+  log.info(`ERC20MinimalMock : ${token.address}`);
 
   const commerceImpl = await viem.deployContract("AgenticCommerceUpgradeable", [], withOwner);
   const commerceInit = encodeFunctionData({
@@ -155,7 +155,7 @@ async function buildLocalContext(
       }),
     asPolicy: (wallet) =>
       viem.getContractAt("OptimisticPolicy", policy.address, { client: { wallet } }),
-    asToken: (wallet) => viem.getContractAt("MockERC20", token.address, { client: { wallet } }),
+    asToken: (wallet) => viem.getContractAt("ERC20MinimalMock", token.address, { client: { wallet } }),
   };
   return ctx;
 }
@@ -203,7 +203,7 @@ async function buildTestnetContext(
     withOwner,
   );
   const paymentToken = getAddress((await commerce.read.paymentToken()) as `0x${string}`);
-  const token = await viem.getContractAt("MockERC20", paymentToken, withOwner);
+  const token = await viem.getContractAt("ERC20MinimalMock", paymentToken, withOwner);
 
   const preflight = await testnetPreflight(
     publicClient,
@@ -270,7 +270,7 @@ async function buildTestnetContext(
       }),
     asPolicy: (wallet) =>
       viem.getContractAt("OptimisticPolicy", policy.address, { client: { wallet } }),
-    asToken: (wallet) => viem.getContractAt("MockERC20", paymentToken, { client: { wallet } }),
+    asToken: (wallet) => viem.getContractAt("ERC20MinimalMock", paymentToken, { client: { wallet } }),
   };
   return ctx;
 }

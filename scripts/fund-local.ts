@@ -3,19 +3,19 @@ import { formatEther, formatUnits, getAddress, parseEther, parseUnits } from "vi
 
 /**
  * Top up a target address on a local / forked network with native coin and
- * MockERC20. Intended for end-to-end testing where a developer wants to act
+ * ERC20MinimalMock. Intended for end-to-end testing where a developer wants to act
  * as a client or provider agent using an address other than Hardhat's default
  * signer.
  *
  *   FUND_RECIPIENT=0x... FUND_TOKEN_ADDRESS=0x... bun run fund:local
  *
  * Env vars are intentionally passed inline (never committed to .env) because
- * the recipient and MockERC20 address change every fresh local node. The
+ * the recipient and ERC20MinimalMock address change every fresh local node. The
  * deploy:local script prints the full ready-to-run command for you.
  *
  * Fixed defaults (edit this file to change):
  *   - 10 native coin
- *   - 10000 MockERC20 (18 decimals)
+ *   - 10000 ERC20MinimalMock (18 decimals)
  *
  * Refuses to run on `bsc` or `bscTestnet` as a safety rail — minting real
  * tokens on a real network is never what you want.
@@ -43,7 +43,7 @@ async function main() {
   if (LIVE_NETWORKS.has(networkName)) {
     throw new Error(
       `fund-local.ts refuses to run on live network "${networkName}". ` +
-        `This script mints MockERC20 tokens and is meant for local / forked use only.`,
+        `This script mints ERC20MinimalMock tokens and is meant for local / forked use only.`,
     );
   }
 
@@ -66,8 +66,8 @@ async function main() {
   await publicClient.waitForTransactionReceipt({ hash: ethTx });
   console.log(`ETH tx  : ${ethTx}`);
 
-  // MockERC20.mint is permissionless (see contracts/MockERC20.sol).
-  const token = await viem.getContractAt("MockERC20", tokenAddr);
+  // ERC20MinimalMock.mint is permissionless (see contracts/ERC20MinimalMock.sol).
+  const token = await viem.getContractAt("ERC20MinimalMock", tokenAddr);
   const mintTx = await token.write.mint([recipient, TOKEN_AMOUNT]);
   await publicClient.waitForTransactionReceipt({ hash: mintTx });
   console.log(`Mint tx : ${mintTx}`);

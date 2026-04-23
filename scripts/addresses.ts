@@ -5,7 +5,7 @@
  * `deploy.ts` reads this table top-to-bottom with a cascade rule:
  *
  *   - paymentToken blank
- *       → FULL-STACK ROTATION. Script deploys a fresh MockERC20 + fresh
+ *       → FULL-STACK ROTATION. Script deploys a fresh ERC20MinimalMock + fresh
  *         Commerce proxy + fresh Router proxy + fresh Policy. cfg.commerceProxy
  *         and cfg.routerProxy are IGNORED in this branch (warning is printed).
  *         Intended use: "I want to rotate paymentToken". The old Commerce /
