@@ -78,7 +78,11 @@ contract EvaluatorRouterUpgradeable is
     event CommerceSet(address indexed oldCommerce, address indexed newCommerce);
     event PolicyWhitelisted(address indexed policy, bool indexed status);
     event JobRegistered(uint256 indexed jobId, address indexed policy, address indexed client);
-    event JobSettled(uint256 indexed jobId, uint8 indexed verdict, bytes32 reason);
+    /// @notice Emitted when a verdict is applied. `reason` is the raw value returned by the
+    ///         policy; the kernel's JobCompleted/JobRejected events carry
+    ///         `keccak256(abi.encode(policy, reason))` so each kernel reason is uniquely
+    ///         namespaced to the policy that produced it.
+    event JobSettled(uint256 indexed jobId, address indexed policy, uint8 indexed verdict, bytes32 reason);
 
     // ---------------------------------------------------------------
     // Errors
@@ -221,17 +225,22 @@ contract EvaluatorRouterUpgradeable is
 
         (uint8 verdict, bytes32 reason) = IPolicy(policy).check(jobId, evidence);
 
+        // Namespace the reason with the policy address so the kernel's
+        // JobCompleted/JobRejected events carry a value that is both unique to
+        // this policy and verifiable against this Router's JobSettled event.
+        bytes32 wrappedReason = keccak256(abi.encode(policy, reason));
+
         if (verdict == VERDICT_APPROVE) {
-            $.commerce.complete(jobId, reason, "");
+            $.commerce.complete(jobId, wrappedReason, "");
         } else if (verdict == VERDICT_REJECT) {
-            $.commerce.reject(jobId, reason, "");
+            $.commerce.reject(jobId, wrappedReason, "");
         } else if (verdict == VERDICT_PENDING) {
             revert NotDecided();
         } else {
             revert UnknownVerdict(verdict);
         }
 
-        emit JobSettled(jobId, verdict, reason);
+        emit JobSettled(jobId, policy, verdict, reason);
     }
 
     // ---------------------------------------------------------------

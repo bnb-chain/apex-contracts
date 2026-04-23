@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { getAddress, zeroAddress } from "viem";
+import { encodeAbiParameters, getAddress, keccak256, parseAbiParameters, parseEventLogs, toBytes, zeroAddress } from "viem";
 
-import { JobStatus, DEFAULT_BUDGET, deployStack, blockTimestamp } from "./helpers.js";
+import {
+  JobStatus,
+  DEFAULT_BUDGET,
+  DEFAULT_DISPUTE_WINDOW,
+  deployStack,
+  blockTimestamp,
+  advanceSeconds,
+  createFundedSubmittedJob,
+} from "./helpers.js";
 
 describe("EvaluatorRouterUpgradeable", async () => {
   const { viem } = await network.connect();
@@ -235,13 +243,66 @@ describe("EvaluatorRouterUpgradeable", async () => {
   });
 
   // ==================================================================
-  // settle with unregistered job
+  // settle
   // ==================================================================
 
   describe("settle", () => {
     it("reverts PolicyNotSet when jobId has no binding", async () => {
       const { router } = await setup();
       await assert.rejects(router.write.settle([1n, "0x"]), /PolicyNotSet/);
+    });
+
+    it("JobSettled carries policy address and original policy reason", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+
+      const txHash = await ctx.router.write.settle([jobId, "0x"]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      const settled = parseEventLogs({ abi: ctx.router.abi, logs: receipt.logs, eventName: "JobSettled" });
+      assert.equal(settled.length, 1);
+      const ev = settled[0].args;
+      assert.equal(ev.jobId, jobId);
+      assert.equal(getAddress(ev.policy!), getAddress(ctx.policy.address));
+      assert.equal(ev.verdict, 1); // APPROVE
+
+      // reason in JobSettled is the raw policy constant
+      const REASON_APPROVED = keccak256(toBytes("OPTIMISTIC_APPROVED"));
+      assert.equal(ev.reason, REASON_APPROVED);
+    });
+
+    it("settle passes keccak256(abi.encode(policy, reason)) to kernel JobCompleted", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+
+      const txHash = await ctx.router.write.settle([jobId, "0x"]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      const REASON_APPROVED = keccak256(toBytes("OPTIMISTIC_APPROVED"));
+      const wrappedReason = keccak256(
+        encodeAbiParameters(parseAbiParameters("address, bytes32"), [
+          getAddress(ctx.policy.address),
+          REASON_APPROVED,
+        ]),
+      );
+
+      const completed = parseEventLogs({
+        abi: ctx.commerce.abi,
+        logs: receipt.logs,
+        eventName: "JobCompleted",
+      });
+      assert.equal(completed.length, 1);
+      assert.equal(completed[0].args.reason, wrappedReason);
     });
   });
 });

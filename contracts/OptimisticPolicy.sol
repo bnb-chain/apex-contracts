@@ -90,6 +90,9 @@ contract OptimisticPolicy is IPolicy {
     event JobInitialised(uint256 indexed jobId, bytes32 deliverable, uint64 submittedAt);
     event Disputed(uint256 indexed jobId, address indexed client);
     event VoteCast(uint256 indexed jobId, address indexed voter, uint16 rejectVotes);
+    /// @notice Emitted on the vote that first meets or exceeds `voteQuorum`.
+    ///         Off-chain subscribers can use this as a zero-latency "ready to settle" signal.
+    event QuorumReached(uint256 indexed jobId, uint16 rejectVotes);
     event VoterAdded(address indexed voter, uint16 activeVoterCount);
     event VoterRemoved(address indexed voter, uint16 activeVoterCount);
     event QuorumUpdated(uint16 oldQuorum, uint16 newQuorum);
@@ -252,6 +255,7 @@ contract OptimisticPolicy is IPolicy {
         }
         rejectVotes[jobId] = newCount;
         emit VoteCast(jobId, msg.sender, newCount);
+        if (newCount >= voteQuorum) emit QuorumReached(jobId, newCount);
     }
 
     // ---------------------------------------------------------------

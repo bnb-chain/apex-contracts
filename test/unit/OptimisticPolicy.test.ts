@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { getAddress, keccak256, toBytes, zeroAddress } from "viem";
+import { getAddress, keccak256, parseEventLogs, toBytes, zeroAddress } from "viem";
 
 import {
   Verdict,
@@ -14,6 +14,7 @@ import {
 
 describe("OptimisticPolicy", async () => {
   const { viem } = await network.connect();
+  const publicClient = await viem.getPublicClient();
   const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W, voter3W] =
     await viem.getWalletClients();
   const deployer = getAddress(deployerW.account.address);
@@ -276,6 +277,34 @@ describe("OptimisticPolicy", async () => {
 
       const policyAsClient = await asPolicy(ctx.policy.address, clientW);
       await assert.rejects(policyAsClient.write.dispute([jobId]), /WrongJobStatus/);
+    });
+
+    it("QuorumReached emitted on the vote that reaches quorum", async () => {
+      const ctx = await setup(); // quorum = 2, voters = [voter1, voter2]
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+
+      const policyAsClient = await asPolicy(ctx.policy.address, clientW);
+      await policyAsClient.write.dispute([jobId]);
+
+      // First vote (1 < quorum): no QuorumReached
+      const policyAsV1 = await asPolicy(ctx.policy.address, voter1W);
+      const tx1 = await policyAsV1.write.voteReject([jobId]);
+      const receipt1 = await publicClient.waitForTransactionReceipt({ hash: tx1 });
+      const qr1 = parseEventLogs({ abi: ctx.policy.abi, logs: receipt1.logs, eventName: "QuorumReached" });
+      assert.equal(qr1.length, 0, "QuorumReached should not fire below quorum");
+
+      // Second vote (2 == quorum): QuorumReached fired
+      const policyAsV2 = await asPolicy(ctx.policy.address, voter2W);
+      const tx2 = await policyAsV2.write.voteReject([jobId]);
+      const receipt2 = await publicClient.waitForTransactionReceipt({ hash: tx2 });
+      const qr2 = parseEventLogs({ abi: ctx.policy.abi, logs: receipt2.logs, eventName: "QuorumReached" });
+      assert.equal(qr2.length, 1);
+      assert.equal(qr2[0].args.jobId, jobId);
+      assert.equal(qr2[0].args.rejectVotes, 2);
     });
   });
 });
