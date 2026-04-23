@@ -36,6 +36,12 @@ contract AgenticCommerceUpgradeable is
     /// @notice Basis-point denominator. `feeBP = 10_000` = 100%.
     uint256 public constant BP_DENOMINATOR = 10_000;
 
+    /// @notice Extra window after `submittedAt` during which the evaluator can
+    ///         still settle even if `expiredAt` has passed. Prevents a race
+    ///         condition where a late-expiring job could be refunded before the
+    ///         evaluator calls {complete}.
+    uint256 public constant EVALUATION_GRACE_PERIOD = 1 hours;
+
     // ---------------------------------------------------------------
     // Storage (flat upgradeable layout; append-only)
     // ---------------------------------------------------------------
@@ -104,6 +110,7 @@ contract AgenticCommerceUpgradeable is
     error FeeTooHigh();
     error HookMissingInterface();
     error HookCallFailed();
+    error GracePeriodActive();
 
     // ---------------------------------------------------------------
     // Initialisation
@@ -239,7 +246,8 @@ contract AgenticCommerceUpgradeable is
             budget: 0,
             expiredAt: expiredAt,
             status: JobStatus.Open,
-            hook: hook
+            hook: hook,
+            submittedAt: 0
         });
         emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt, hook);
 
@@ -319,6 +327,7 @@ contract AgenticCommerceUpgradeable is
         bytes memory hookData = abi.encode(deliverable, optParams);
         _beforeHook(job.hook, jobId, this.submit.selector, hookData);
         job.status = JobStatus.Submitted;
+        job.submittedAt = block.timestamp;
         _afterHook(job.hook, jobId, this.submit.selector, hookData);
 
         emit JobSubmitted(jobId, job.provider, deliverable);
@@ -402,6 +411,10 @@ contract AgenticCommerceUpgradeable is
             revert WrongStatus();
         }
         if (block.timestamp < job.expiredAt) revert WrongStatus();
+        if (job.status == JobStatus.Submitted &&
+            block.timestamp < job.submittedAt + EVALUATION_GRACE_PERIOD) {
+            revert GracePeriodActive();
+        }
 
         job.status = JobStatus.Expired;
         if (job.budget > 0) {

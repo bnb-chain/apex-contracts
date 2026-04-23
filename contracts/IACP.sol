@@ -28,6 +28,7 @@ interface IACP {
         uint256 expiredAt;
         JobStatus status;
         address hook;
+        uint256 submittedAt; // Timestamp when provider submitted; 0 before submission
     }
 
     /// @notice Returns the full {Job} struct for `jobId`.
