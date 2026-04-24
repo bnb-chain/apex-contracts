@@ -87,7 +87,7 @@ contract OptimisticPolicy is IPolicy {
     // Events
     // ---------------------------------------------------------------
 
-    event JobInitialised(uint256 indexed jobId, bytes32 deliverable, uint64 submittedAt);
+    event JobInitialised(uint256 indexed jobId, bytes32 deliverable, uint64 submittedAt, bytes optParams);
     event Disputed(uint256 indexed jobId, address indexed client);
     event VoteCast(uint256 indexed jobId, address indexed voter, uint16 rejectVotes);
     /// @notice Emitted on the vote that first meets or exceeds `voteQuorum`.
@@ -169,19 +169,18 @@ contract OptimisticPolicy is IPolicy {
     // ---------------------------------------------------------------
 
     /// @inheritdoc IPolicy
-    /// @dev `optParams` is accepted for interface compatibility but not used
-    ///      by the optimistic policy. It is intentionally not persisted to
-    ///      storage to keep the policy gas-neutral versus the pre-passthrough
-    ///      implementation.
+    /// @dev `optParams` is emitted in {JobInitialised} so off-chain voters can
+    ///      locate and verify the deliverable manifest (e.g. parse JSON for
+    ///      `deliverable_url`). It is not persisted to storage.
     function onSubmitted(
         uint256 jobId,
         bytes32 deliverable,
-        bytes calldata /* optParams */
+        bytes calldata optParams
     ) external override onlyRouter {
         if (submittedAt[jobId] != 0) revert AlreadyInitialised();
         uint64 ts = uint64(block.timestamp);
         submittedAt[jobId] = ts;
-        emit JobInitialised(jobId, deliverable, ts);
+        emit JobInitialised(jobId, deliverable, ts, optParams);
     }
 
     /// @inheritdoc IPolicy
