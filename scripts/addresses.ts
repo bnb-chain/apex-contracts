@@ -60,10 +60,10 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
     paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // e.g. USDC on BSC Testnet
     treasury: "0x1001b2C085345f388778A975648aA50bcfd0D134",
     commerceProxy: "0xa206c0517b6371c6638cd9e4a42cc9f02a33b0de",
-    commerceImpl: "0x977905954f5deb55908666ead4b2d26a7655393c",
+    commerceImpl: "0x5b109f738404402a42b25c88294e044e0365188d",
     routerProxy: "0xd7d36d66d2f1b608a0f943f722d27e3744f66f25",
-    routerImpl: "0x525d4b10c2d78e06fb9711f1f6220a76837b705a",
-    policy: "0x0355f9a3cc3e36099acb9d471456d0449325f365",
+    routerImpl: "0xfc45236db52c3b4e9d62e2c7654f479b2da02910",
+    policy: "0x1fb48755361a34bbe728ccc55582116eec344214",
   },
   // bsc: {
   //   paymentToken:  "0x...", // e.g. USDC on BSC Mainnet
