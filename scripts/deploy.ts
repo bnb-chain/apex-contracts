@@ -302,6 +302,9 @@ async function main(): Promise<void> {
     console.log(`Next step (after pasting the block above back into addresses.ts):`);
     console.log(`  bun run ${verifyScript}`);
     console.log(``);
+    console.log(`If contract source changed this run, also refresh abis/:`);
+    console.log(`  bun run abis   (and commit the abis/ diff)`);
+    console.log(``);
   }
 }
 

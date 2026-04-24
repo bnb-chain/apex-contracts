@@ -4,6 +4,7 @@
   "description": "APEX (Agent Payment Exchange) Protocol v1 — ERC-8183 kernel + pluggable Evaluator Router + Optimistic Policy",
   "scripts": {
     "compile": "bunx hardhat compile",
+    "abis": "bun run compile && bun scripts/export-abi.ts",
     "test": "bun test test/unit/",
     "e2e:local": "bunx hardhat run test/e2e/runner.ts --network localhost",
     "e2e:testnet": "bunx hardhat run test/e2e/runner.ts --network bscTestnet",
@@ -13,8 +14,8 @@
     "fund:local": "bunx hardhat run scripts/fund-local.ts --network localhost",
     "node": "bunx hardhat node",
     "lint:sol": "bunx solhint 'contracts/**/*.sol'",
-    "format:check": "bunx prettier --check 'contracts/**/*.sol' '{scripts,test}/**/*.ts' '*.{ts,json,md}' 'docs/**/*.md'",
-    "format": "bunx prettier --write 'contracts/**/*.sol' '{scripts,test}/**/*.ts' '*.{ts,json,md}' 'docs/**/*.md'"
+    "format:check": "bunx prettier --check 'contracts/**/*.sol' '{scripts,test}/**/*.ts' '*.{ts,json,md}' 'docs/**/*.md' 'abis/*.json'",
+    "format": "bunx prettier --write 'contracts/**/*.sol' '{scripts,test}/**/*.ts' '*.{ts,json,md}' 'docs/**/*.md' 'abis/*.json'"
   },
   "keywords": [
     "apex",

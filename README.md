@@ -40,9 +40,10 @@ See [`docs/design.md`](./docs/design.md) for the full design document
 
 ```
 contracts/   Kernel, Router, Policy, interfaces, test-only mocks/
-scripts/     deploy.ts · verify.ts · fund-local.ts · addresses.ts · lib/
+scripts/     deploy.ts · verify.ts · fund-local.ts · export-abi.ts · addresses.ts · lib/
 test/        unit/ (bun test) + e2e/ (5-flow ERC-8183 runner)
 docs/        design.md · erc-8183-compliance.md · custom-policy.md · deployment.md
+abis/        Slim ABI JSON for the 3 public contracts (run `bun run abis` to regenerate)
 ```
 
 ## Deployments
@@ -61,7 +62,7 @@ addresses and the treasury are operational details — look them up in
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `AgenticCommerceUpgradeable`    | [`0xa206c0517B6371C6638CD9e4a42Cc9f02A33B0DE`](https://testnet.bscscan.com/address/0xa206c0517B6371C6638CD9e4a42Cc9f02A33B0DE) |
 | `EvaluatorRouterUpgradeable`    | [`0xD7d36D66d2F1B608A0F943f722D27e3744f66F25`](https://testnet.bscscan.com/address/0xD7d36D66d2F1B608A0F943f722D27e3744f66F25) |
-| `OptimisticPolicy`              | [`0x0355F9a3Cc3E36099acb9D471456D0449325F365`](https://testnet.bscscan.com/address/0x0355F9a3Cc3E36099acb9D471456D0449325F365) |
+| `OptimisticPolicy`              | [`0x1fb48755361a34bbe728ccc55582116eec344214`](https://testnet.bscscan.com/address/0x1fb48755361a34bbe728ccc55582116eec344214) |
 | Payment token (USDC on testnet) | [`0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565`](https://testnet.bscscan.com/address/0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565) |
 
 Testnet `OptimisticPolicy` runs with a short dispute window for faster
