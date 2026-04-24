@@ -111,7 +111,7 @@ covers several full runs.
 
 ### Steps
 
-1. Copy `.env.example` to `.env.testnet` and fill in, at minimum:
+1. Copy `.env.example` to `.env` and fill in, at minimum:
 
    ```
    BSC_TESTNET_RPC_URL=https://data-seed-prebsc-2-s3.binance.org:8545

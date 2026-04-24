@@ -70,10 +70,6 @@ bun run compile                   # == bunx hardhat compile
 
 # Tests (62 tests, ~1.3s)
 bun test
-bun run test:commerce
-bun run test:router
-bun run test:policy
-bun run test:lifecycle
 
 # Formatting + lint
 bun run format                    # Prettier (+ prettier-plugin-solidity) write
@@ -89,18 +85,15 @@ bun run fund:local                # Sends ETH + MockERC20 to FUND_RECIPIENT
 
 # Deployment (BSC Testnet) — same script handles first deploy, impl upgrade,
 # and policy rotation (decided per-field from scripts/addresses.ts)
-bun run deploy:testnet            # Uses .env.testnet
+bun run deploy:testnet            # Uses .env
 
 # Verification (manual)
 bunx hardhat verify --network bscTestnet <impl_address>
 ```
 
-Required env files per environment (loaded via `DOTENV_CONFIG_PATH`):
-
-- `.env.testnet` — public testnet deploy
-- `.env` — default fallback (used if `DOTENV_CONFIG_PATH` unset; local dev)
-
-Never commit any of these. See `.env.example` for the full schema.
+A single `.env` covers local + testnet + mainnet; `--network` on the hardhat
+CLI selects which `BSC_*_PRIVATE_KEY` / `BSC_*_RPC_URL` is read. Never commit
+it. See `.env.example` for the full schema.
 
 ---
 

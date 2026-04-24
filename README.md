@@ -33,43 +33,16 @@ This repository implements a lightweight three-layer architecture:
   to reject; otherwise the job stays pending until the kernel's
   `claimRefund` escape hatch kicks in at expiry.
 
-See `docs/design.md` for the full
-design document — architecture, user flows, risks, and verification matrix.
+See [`docs/design.md`](./docs/design.md) for the full design document
+(architecture, user flows, risks, verification matrix).
 
 ## Layout
 
 ```
-contracts/
-  AgenticCommerceUpgradeable.sol   ERC-8183 kernel (UUPS, Pausable)
-  EvaluatorRouterUpgradeable.sol   Routing layer (UUPS, Pausable, ERC-7201)
-  OptimisticPolicy.sol             Pluggable optimistic policy (immutable)
-  IACP.sol                         Router/Policy ↔ Commerce interface
-  IPolicy.sol                      Router ↔ Policy interface
-  IACPHook.sol                     ERC-8183 hook interface
-  ERC1967Proxy.sol                 Test-helper wrapper around OZ's proxy
-  mocks/                           Test-only contracts (not deployed to live networks)
-    MockERC20.sol                  Test payment token
-    RevertingHook.sol              Proves claimRefund is non-hookable
-    AgenticCommerceV2Mock.sol      UUPS upgrade target for commerce tests
-    EvaluatorRouterV2Mock.sol      UUPS upgrade target for router tests
-scripts/
-  deploy.ts                        One-shot stack deploy / impl upgrade / policy refresh
-  addresses.ts                     Hand-committed registry of deployed addresses
-test/
-  unit/                            Unit tests (run by `bun test`)
-    helpers.ts                     Shared test fixtures
-    AgenticCommerce.test.ts        Kernel state machine
-    EvaluatorRouter.test.ts        Hook gating + registration
-    OptimisticPolicy.test.ts       Policy admin, dispute + vote
-    Lifecycle.test.ts              Integration on the in-memory chain
-    Upgrades.test.ts               UUPS upgrade coverage
-  e2e/                             End-to-end runner (local + BSC Testnet)
-    runner.ts                      Entry point for `bun run e2e:*`
-    README.md                      E2E setup + balance requirements
-docs/
-  design.md                        Canonical design document
-  erc-8183-compliance.md           ERC-8183 compliance matrix + change log
-  custom-policy.md                 How to author a new IPolicy implementation
+contracts/   Kernel, Router, Policy, interfaces, test-only mocks/
+scripts/     deploy.ts · verify.ts · fund-local.ts · addresses.ts · lib/
+test/        unit/ (bun test) + e2e/ (5-flow ERC-8183 runner)
+docs/        design.md · erc-8183-compliance.md · custom-policy.md · deployment.md
 ```
 
 ## Getting started
@@ -93,14 +66,14 @@ bun run node
 bun run deploy:local
 #   copy the ready-to-run fund:local command printed at the bottom
 
-# terminal 2 — top up a test EOA with native coin + MockERC20
-#   (fixed defaults: 10 native coin + 10000 MockERC20).
+# terminal 2 — top up a test EOA with native coin + ERC20MinimalMock
+#   (fixed defaults: 10 native coin + 10000 test tokens).
 #   Env vars are one-shot CLI prefixes; do NOT add them to .env.
 FUND_RECIPIENT=0x... FUND_TOKEN_ADDRESS=0x... bun run fund:local
 ```
 
-`fund:local` refuses to run on `bsc` or `bscTestnet`. MockERC20 is a
-permissionless-mint test token; never use it as a real payment asset.
+`fund:local` refuses to run on `bsc` or `bscTestnet`. `ERC20MinimalMock`
+is a permissionless-mint test token; never use it as a real payment asset.
 
 ### End-to-end runner
 
@@ -117,124 +90,37 @@ bun run e2e:testnet
 ```
 
 Testnet requires 3 pre-funded wallets (owner, client, provider) configured via
-`.env.testnet`. See [`test/e2e/README.md`](./test/e2e/README.md) for the full
+`.env`. See [`test/e2e/README.md`](./test/e2e/README.md) for the full
 balance + key matrix.
 
 ### Deploy to BSC Testnet / Mainnet
 
-Optionally pre-fill inputs in [`scripts/addresses.ts`](./scripts/addresses.ts)
-for the target network:
-
-```ts
-export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
-  bscTestnet: {
-    paymentToken: "0x...", // e.g. USDC on BSC Testnet
-    treasury: "0x...", // EOA or multisig that collects platform fees
-    // commerceProxy / routerProxy / policy come back from deploy stdout
-  },
-};
-```
-
-Every field is optional. `deploy.ts` reads the entry top-to-bottom with one
-cascading rule: **blank `paymentToken` triggers a full-stack rotation.** The
-rest of the fields decide reuse-vs-deploy independently:
-
-| Field           | Filled → reuse                                                                          | Blank → deploy                                                                                                                                |
-| --------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `paymentToken`  | use that ERC-20                                                                         | deploy fresh `MockERC20` **and** force fresh Commerce + Router + Policy (cascade; `commerceProxy` / `routerProxy` are ignored in this branch) |
-| `treasury`      | passed into `commerce.initialize` on fresh path; logged only on reuse path              | fall back to the deployer                                                                                                                     |
-| `commerceProxy` | keep proxy; deploy new impl + signed `upgradeToAndCall`                                 | deploy fresh impl + `ERC1967Proxy` + `initialize` **and** force fresh Router (so it doesn't dangle)                                           |
-| `routerProxy`   | keep proxy; deploy new impl + signed `upgradeToAndCall` (requires Commerce was reused)  | deploy fresh impl + `ERC1967Proxy` + `initialize`                                                                                             |
-| `policy`        | (always rotated; the stored value is only used to print a "revoke old policy" reminder) | always freshly deployed + whitelisted                                                                                                         |
-
-Then:
-
 ```bash
-cp .env.example .env.testnet
-# fill BSC_TESTNET_PRIVATE_KEY (and ETHERSCAN_API_KEY if you plan to verify)
-bun run deploy:testnet
+cp .env.example .env          # fill BSC_TESTNET_PRIVATE_KEY + ETHERSCAN_API_KEY
+bun run deploy:testnet        # first deploy, impl upgrade, OR full-stack rotation
+bun run verify:testnet        # zero-arg Etherscan verify
 ```
 
-`deploy.ts` prints a block of `0x…` values; paste the ones it emits under the
-same `ADDRESSES` entry and commit. Subsequent runs will reuse them. The same
-command handles first deploys, impl upgrades, and full-stack rotations —
-there is no separate `upgrade:*` script.
-
-The reuse paths of `commerceProxy` / `routerProxy` require the signer to
-still be the **owner** of both proxies — `upgradeToAndCall` and
-`setPolicyWhitelist` are owner-gated, and `deploy.ts` pre-checks `owner()`
-on both proxies before touching them. Once ownership has been transferred
-to the production multisig, run impl upgrades and policy rotations from the
-multisig directly.
-
-### Rotating `paymentToken`
-
-`paymentToken` is set in `commerce.initialize` and has no setter. To rotate
-it, **clear `paymentToken` in `scripts/addresses.ts`** and re-run
-`bun run deploy:<env>`. The script deploys a brand-new MockERC20 (or you
-can paste the new real token address in first), plus fresh Commerce + Router
-
-- Policy. The old Commerce / Router remain on-chain; any in-flight jobs
-  against the old Commerce must drain via
-  `oldCommerce.claimRefund(jobId)` after expiry (`claimRefund` is never
-  pausable nor hookable).
-
-### Post-deploy ownership transfer
-
-Deployer holds full control of Commerce / Router / Policy immediately after
-deploy. Transfer to the production multisig ASAP via the two-step flow (the
-multisig must accept on the second step for the change to take effect):
-
-```solidity
-// Commerce + Router use OpenZeppelin Ownable2Step
-commerce.transferOwnership(multisig);
-router.transferOwnership(multisig);
-// ... then, signed by the multisig:
-commerce.acceptOwnership();
-router.acceptOwnership();
-
-// OptimisticPolicy uses a matching custom pattern
-policy.transferAdmin(multisig);
-// ... signed by the multisig:
-policy.acceptAdmin();
-```
-
-After the multisig has accepted ownership, it MUST:
-
-1. Add ≥ `INITIAL_QUORUM` voters via `policy.addVoter(addr)`.
-2. Whitelist any additional policies via
-   `router.setPolicyWhitelist(addr, true)` (the deployer-run policy is
-   whitelisted automatically before ownership handoff).
-
-### Deployed addresses
-
-Canonical source of truth: [`scripts/addresses.ts`](./scripts/addresses.ts).
-Implementation addresses are ephemeral and not tracked — derive them from the
-latest `Upgraded` event on each proxy when needed for Etherscan verification.
+**Before transferring ownership to a production multisig, read the post-deploy
+checklist in [`docs/deployment.md`](./docs/deployment.md).** That file is
+also the source of truth for the reuse-vs-deploy cascade rules and the
+`paymentToken` rotation procedure.
 
 ## ERC-8183 deviations
 
-This deployment knowingly deviates from the spec in two places. Both are
-documented and mitigated:
-
-- **Upgradeable contracts (`SHOULD NOT` for hooks).** The Router is UUPS
-  upgradeable and acts as the hook for every registered job. Mitigation:
-  multisig + TimelockController; the operational default is NEVER UPGRADE.
-  For policy replacement use drain-and-redeploy via `router.pause()`.
-- **`reject` on Funded/Submitted is evaluator-only.** Spec allows multiple
-  legitimate rejectors; this kernel deliberately narrows the surface.
-
-See `docs/design.md §5 Contract Details` and `§6 Risks` for the full list.
+See [`docs/erc-8183-compliance.md`](./docs/erc-8183-compliance.md) for the
+compliance matrix and each deliberate deviation (upgradeable hook,
+evaluator-only `reject`) with its mitigation.
 
 ## Security
 
-- `ReentrancyGuardTransient` on every mutating state-transition in the
+- `ReentrancyGuardTransient` on every mutating state transition in the
   kernel and on `settle` in the router.
 - Hook calls are ERC-165 gated at `createJob` and gas-limited to 1 000 000
   gas at call time (kernel bails out of its own state on hook failure).
 - `claimRefund` is **never** pausable and **never** invokes hooks — it is
   the universal escape hatch for clients after `expiredAt`.
-- `OptimisticPolicy` enforces `voteQuorum ≤ activeVoterCount` bidirectionally
-  (`setQuorum` and `removeVoter` can both revert to maintain the invariant).
+- `OptimisticPolicy` enforces `voteQuorum ≤ activeVoterCount` bidirectionally.
 
+Full threat model: [`docs/design.md`](./docs/design.md) §6 Risks.
 Please report vulnerabilities through the [BNB Chain Bug Bounty Program](https://bugbounty.bnbchain.org/).

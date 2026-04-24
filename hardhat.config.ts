@@ -6,15 +6,16 @@ import hardhatToolboxViemPlugin from "@nomicfoundation/hardhat-toolbox-viem";
 import dotenv from "dotenv";
 import * as fs from "fs";
 
-// Load the specified env file. dotenv v17 auto-injects .env before any code runs,
-// so override:true ensures DOTENV_CONFIG_PATH values take precedence.
-const envPath = process.env.DOTENV_CONFIG_PATH || ".env";
-if (!fs.existsSync(envPath)) {
-  console.error(`\x1b[31mFATAL: env file not found: ${envPath}\x1b[0m`);
+// One .env covers local + testnet + mainnet; `--network` selects which
+// BSC_*_PRIVATE_KEY / BSC_*_RPC_URL gets read. override:true because dotenv
+// v17 auto-injects .env earlier with override:false.
+if (!fs.existsSync(".env")) {
+  console.error(
+    "\x1b[31mFATAL: .env not found. Copy .env.example → .env and fill in the blanks.\x1b[0m",
+  );
   process.exit(1);
 }
-dotenv.config({ path: envPath, override: true });
-console.log(`[hardhat] env loaded from ${envPath}`);
+dotenv.config({ path: ".env", override: true });
 
 const config: HardhatUserConfig = {
   plugins: [hardhatToolboxViemPlugin],

@@ -1,6 +1,11 @@
 import { network } from "hardhat";
-import { encodeFunctionData, getAddress, parseUnits } from "viem";
+import { getAddress, parseUnits } from "viem";
 import { ADDRESSES } from "./addresses.js";
+import {
+  ERC20_MOCK_CONSTRUCTOR_ARGS,
+  commerceInitCalldata,
+  routerInitCalldata,
+} from "./lib/apex-init.js";
 
 /**
  * Single idempotent deploy / upgrade / rotation script for the v1 stack.
@@ -133,7 +138,7 @@ async function main(): Promise<void> {
   let paymentToken: `0x${string}`;
   if (freshPaymentToken) {
     console.log(`\n[1/5] paymentToken: deploying ERC20MinimalMock ...`);
-    const token = await viem.deployContract("ERC20MinimalMock", ["Apex Test Token", "APT", 18]);
+    const token = await viem.deployContract("ERC20MinimalMock", [...ERC20_MOCK_CONSTRUCTOR_ARGS]);
     paymentToken = token.address;
     await token.write.mint([deployer, parseUnits("1000000", 18)]);
     console.log(`      addr : ${paymentToken} (minted 1,000,000 APT to deployer)`);
@@ -153,11 +158,7 @@ async function main(): Promise<void> {
   if (freshCommerce) {
     console.log(`\n[3/5] Commerce: deploying fresh impl + proxy ...`);
     const impl = await viem.deployContract("AgenticCommerceUpgradeable", []);
-    const initData = encodeFunctionData({
-      abi: impl.abi,
-      functionName: "initialize",
-      args: [paymentToken, treasury, owner],
-    });
+    const initData = commerceInitCalldata(impl.abi, { paymentToken, treasury, owner });
     const proxy = await viem.deployContract("ERC1967Proxy", [impl.address, initData]);
     commerce = await viem.getContractAt("AgenticCommerceUpgradeable", proxy.address);
     commerceImplAddr = impl.address;
@@ -190,11 +191,7 @@ async function main(): Promise<void> {
   if (freshRouter) {
     console.log(`\n[4/5] Router: deploying fresh impl + proxy ...`);
     const impl = await viem.deployContract("EvaluatorRouterUpgradeable", []);
-    const initData = encodeFunctionData({
-      abi: impl.abi,
-      functionName: "initialize",
-      args: [commerce.address, owner],
-    });
+    const initData = routerInitCalldata(impl.abi, { commerce: commerce.address, owner });
     const proxy = await viem.deployContract("ERC1967Proxy", [impl.address, initData]);
     router = await viem.getContractAt("EvaluatorRouterUpgradeable", proxy.address);
     routerImplAddr = impl.address;
@@ -241,7 +238,9 @@ async function main(): Promise<void> {
   console.log(`(only the fields that changed this run are listed):\n`);
   if (freshPaymentToken) console.log(`    paymentToken:  "${paymentToken}",`);
   if (freshCommerce) console.log(`    commerceProxy: "${commerce.address}",`);
+  console.log(`    commerceImpl:  "${commerceImplAddr}",`);
   if (freshRouter) console.log(`    routerProxy:   "${router.address}",`);
+  console.log(`    routerImpl:    "${routerImplAddr}",`);
   console.log(`    policy:        "${policy.address}",`);
   console.log(``);
 
@@ -293,10 +292,17 @@ async function main(): Promise<void> {
     console.log(``);
   }
 
-  console.log(`Implementation addresses (for Etherscan verify only, not persisted):`);
-  console.log(`  commerceImpl: ${commerceImplAddr}`);
-  console.log(`  routerImpl  : ${routerImplAddr}`);
-  console.log(``);
+  const verifyScript =
+    networkName === "bscTestnet"
+      ? "verify:testnet"
+      : networkName === "bsc"
+        ? "verify:mainnet"
+        : null;
+  if (verifyScript) {
+    console.log(`Next step (after pasting the block above back into addresses.ts):`);
+    console.log(`  bun run ${verifyScript}`);
+    console.log(``);
+  }
 }
 
 main().catch((err) => {

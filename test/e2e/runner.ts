@@ -3,7 +3,7 @@
  *
  * Usage:
  *   bun run e2e:local     (requires `bun run node` in another terminal)
- *   bun run e2e:testnet   (requires .env.testnet + 3 pre-funded wallets)
+ *   bun run e2e:testnet   (requires .env + 3 pre-funded wallets)
  *
  * The runner deploys / reuses the APEX stack, then drives all 5 ERC-8183
  * user flows end-to-end (docs/design.md §4). Exit code is 0 iff every flow

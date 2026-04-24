@@ -30,35 +30,48 @@
  *     stored here is ignored as input; it only informs the "revoke old
  *     policy" reminder printed at the end of each run.
  *
+ *   - commerceImpl / routerImpl: current UUPS implementation addresses behind
+ *     each proxy. Read by `scripts/verify.ts` to Etherscan-verify the impl
+ *     source. `deploy.ts` updates them on every run (fresh deploy OR
+ *     upgradeToAndCall), and the operator pastes them back together with the
+ *     proxy address. Purely observational — nothing in the deploy path reads
+ *     these.
+ *
  * Workflow:
  *   1. Optionally pre-fill `paymentToken` + `treasury` for the target
  *      network below; run `bun run deploy:<env>`.
  *   2. Paste the printed block (only the fields that changed in that run)
  *      back into the same entry and commit.
+ *   3. Run `bun run verify:<env>` to Etherscan-verify the whole stack.
  */
 
 export type DeployedAddresses = {
   readonly paymentToken?: `0x${string}`;
   readonly treasury?: `0x${string}`;
   readonly commerceProxy?: `0x${string}`;
+  readonly commerceImpl?: `0x${string}`;
   readonly routerProxy?: `0x${string}`;
+  readonly routerImpl?: `0x${string}`;
   readonly policy?: `0x${string}`;
 };
 
 export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
   bscTestnet: {
-    // paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // e.g. USDC on BSC Testnet
-    paymentToken: "0x706d99bccefec37ed2ae62876347b8b9399e5f2e",
+    paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // e.g. USDC on BSC Testnet
     treasury: "0x1001b2C085345f388778A975648aA50bcfd0D134",
-    commerceProxy: "0x1e677fc06ff772e81051484c8c3845fbef13986d",
-    routerProxy: "0x0c729baa3cdac6cc3fdef6a816f6bcb85ae92ed7",
-    policy: "0xca649363c196afb19ec255610c4dc81a0042a457",
+    commerceProxy: "0xa206c0517b6371c6638cd9e4a42cc9f02a33b0de",
+    commerceImpl: "0x977905954f5deb55908666ead4b2d26a7655393c",
+    routerProxy: "0xd7d36d66d2f1b608a0f943f722d27e3744f66f25",
+    routerImpl: "0x525d4b10c2d78e06fb9711f1f6220a76837b705a",
+    policy: "0x0355f9a3cc3e36099acb9d471456d0449325f365",
   },
   // bsc: {
-  //   paymentToken: "0x...", // e.g. USDC on BSC Mainnet
-  //   treasury:     "0x...",
+  //   paymentToken:  "0x...", // e.g. USDC on BSC Mainnet
+  //   treasury:      "0x...",
   //   commerceProxy: "0x...",
+  //   commerceImpl:  "0x...",
   //   routerProxy:   "0x...",
+  //   routerImpl:    "0x...",
   //   policy:        "0x...",
   // },
 };
