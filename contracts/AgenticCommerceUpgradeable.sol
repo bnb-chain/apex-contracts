@@ -86,7 +86,15 @@ contract AgenticCommerceUpgradeable is
     );
     event ProviderSet(uint256 indexed jobId, address indexed provider);
     event BudgetSet(uint256 indexed jobId, uint256 amount);
-    event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
+    /// @notice Emitted on successful escrow.
+    /// @dev    `provider` is `indexed` so providers can `eth_getLogs` for jobs
+    ///         assigned to them without joining against {JobCreated} (audit I03).
+    ///         The Router-mediated client flow always sets `provider` before
+    ///         `fund`, so it is observably the locked-in counterparty at this
+    ///         moment. This adds one topic to the spec-canonical
+    ///         `JobFunded(jobId, client, amount)` shape; see
+    ///         `docs/erc-8183-compliance.md` for the disclosed deviation.
+    event JobFunded(uint256 indexed jobId, address indexed client, address indexed provider, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
     event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
@@ -103,6 +111,11 @@ contract AgenticCommerceUpgradeable is
     error InvalidJob();
     error WrongStatus();
     error Unauthorized();
+    /// @notice Thrown by {setProvider} when the job already has a provider
+    ///         bound to it. Distinguishes the "provider already set" branch
+    ///         from generic status mismatches so off-chain clients can
+    ///         surface a precise error to users (audit I05).
+    error ProviderAlreadySet();
     error ExpiryTooShort();
     /// @notice Thrown by {createJob} when `expiredAt` is further in the future
     ///         than {MAX_EXPIRY_DURATION} (audit L01).
@@ -278,7 +291,7 @@ contract AgenticCommerceUpgradeable is
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
-        if (job.provider != address(0)) revert WrongStatus();
+        if (job.provider != address(0)) revert ProviderAlreadySet();
         if (provider_ == address(0)) revert ZeroAddress();
 
         bytes memory hookData = abi.encode(provider_, optParams);
@@ -292,6 +305,11 @@ contract AgenticCommerceUpgradeable is
     /// @notice Set the budget for a job. Per ERC-8183, either `client` or
     ///         `provider` MAY call this. Front-running on {fund} is prevented
     ///         by the `expectedBudget` parameter.
+    /// @dev    `amount == 0` is rejected up front (audit I02). The kernel
+    ///         treats `budget > 0` as an invariant of the `Funded` state, and
+    ///         {fund} would otherwise need to encode that invariant a second
+    ///         time. Rejecting at the source also lets us simplify {fund}
+    ///         to a single `jobHasBudget` check.
     function setBudget(uint256 jobId, uint256 amount, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
@@ -299,6 +317,7 @@ contract AgenticCommerceUpgradeable is
         if (msg.sender != job.client && msg.sender != job.provider) {
             revert Unauthorized();
         }
+        if (amount == 0) revert ZeroBudget();
 
         bytes memory hookData = abi.encode(amount, optParams);
         _beforeHook(job.hook, jobId, this.setBudget.selector, hookData);
@@ -317,7 +336,7 @@ contract AgenticCommerceUpgradeable is
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
-        if (!jobHasBudget[jobId] || job.budget == 0) revert ZeroBudget();
+        if (!jobHasBudget[jobId]) revert ZeroBudget();
         if (job.budget != expectedBudget) revert BudgetMismatch();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
 
@@ -326,7 +345,7 @@ contract AgenticCommerceUpgradeable is
         IERC20(paymentToken).safeTransferFrom(job.client, address(this), job.budget);
         _afterHook(job.hook, jobId, this.fund.selector, optParams);
 
-        emit JobFunded(jobId, job.client, job.budget);
+        emit JobFunded(jobId, job.client, job.provider, job.budget);
     }
 
     /// @notice Provider submits the deliverable hash, moving the job to the

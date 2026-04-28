@@ -195,7 +195,12 @@ contract EvaluatorRouterUpgradeable is
     ///           - `job.hook      == address(this)`.
     ///           - `policy` is whitelisted.
     ///           - Policy has not been set for this job.
-    function registerJob(uint256 jobId, address policy) external whenNotPaused {
+    ///         `nonReentrant` is defence-in-depth (audit I06): today the only
+    ///         external call is `commerce.getJob(...)` (a view), so a re-entry
+    ///         is impossible. The guard locks in the CEI ordering so a future
+    ///         policy upgrade that needs to perform an external write here
+    ///         cannot accidentally regress the property.
+    function registerJob(uint256 jobId, address policy) external nonReentrant whenNotPaused {
         RouterStorage storage $ = _router();
         if (!$.policyWhitelist[policy]) revert PolicyNotWhitelisted();
         if ($.jobPolicy[jobId] != address(0)) revert PolicyAlreadySet();

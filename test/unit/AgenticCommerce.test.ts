@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { getAddress, keccak256, toBytes, zeroAddress } from "viem";
+import { getAddress, keccak256, parseEventLogs, toBytes, zeroAddress } from "viem";
 
 import {
   JobStatus,
@@ -235,7 +235,13 @@ describe("AgenticCommerceUpgradeable", async () => {
         "",
         noopHookAddr,
       ]);
-      await assert.rejects(commerceAsClient.write.setProvider([1n, other, "0x"]), /WrongStatus/);
+      // Audit I05: this branch now revert with ProviderAlreadySet, not the
+      // generic WrongStatus, so off-chain clients can distinguish it from
+      // an actual status mismatch.
+      await assert.rejects(
+        commerceAsClient.write.setProvider([1n, other, "0x"]),
+        /ProviderAlreadySet/,
+      );
     });
   });
 
@@ -704,6 +710,63 @@ describe("AgenticCommerceUpgradeable", async () => {
         ]),
         /HookRequired/,
       );
+    });
+
+    // [I02] setBudget(0) used to silently flip jobHasBudget to true and
+    //       leave fund() to fail with a confusing "ZeroBudget" path. The
+    //       kernel now rejects amount == 0 at the source.
+    it("[I02] setBudget rejects amount == 0 with ZeroBudget", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      await assert.rejects(commerceAsClient.write.setBudget([1n, 0n, "0x"]), /ZeroBudget/);
+    });
+
+    // [I03] JobFunded carries an indexed `provider` topic so providers can
+    //       filter funded jobs assigned to them via eth_getLogs alone.
+    it("[I03] JobFunded emits indexed provider topic", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      const txHash = await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      const funded = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "JobFunded",
+      }) as unknown as Array<{
+        args: {
+          jobId: bigint;
+          client: `0x${string}`;
+          provider: `0x${string}`;
+          amount: bigint;
+        };
+      }>;
+      assert.equal(funded.length, 1);
+      const ev = funded[0].args;
+      assert.equal(ev.jobId, 1n);
+      assert.equal(getAddress(ev.client), client);
+      assert.equal(getAddress(ev.provider), provider);
+      assert.equal(ev.amount, DEFAULT_BUDGET);
     });
   });
 });
