@@ -125,6 +125,36 @@ Testnet requires 3 pre-funded wallets (owner, client, provider) configured via
 `.env`. See [`test/e2e/README.md`](./test/e2e/README.md) for the full
 balance + key matrix.
 
+### Pre-deploy checklist
+
+Before running `deploy:*`, verify each of the following — these are
+**deployer responsibilities** and the contracts assume them silently
+(audit I01 / I08):
+
+1. **`paymentToken` is a standard ERC-20.** The kernel does not
+   reconcile pre/post `balanceOf` in `fund`; it trusts that
+   `safeTransferFrom(client, this, budget)` deposits exactly `budget`
+   into the proxy and that the held balance does not drift between
+   calls. The following classes will cause silent escrow accounting
+   drift and revert at settlement:
+   - fee-on-transfer / reflection / deflationary tokens,
+   - rebasing / elastic-supply tokens,
+   - tokens with mid-lifecycle blocklists or fee toggles,
+   - any token whose `balanceOf(address)` can decrease without an
+     outgoing transfer from `address`.
+
+   Audited stablecoins on BNB Chain (USDT, USDC) are safe choices.
+   Confirm against the token's source before calling `initialize`.
+
+2. **Owner is a multisig fronted by a `TimelockController`.** Required
+   delays: 48h for `AgenticCommerce`, 24h for `EvaluatorRouter`. Single-
+   key ownership is a production mis-configuration; see
+   [`docs/design.md`](./docs/design.md) §6 R1.
+3. **Voter set on `OptimisticPolicy` has `≥ 3 × voteQuorum` members**
+   under independent operational control, with 24/7 monitoring. The
+   policy is non-upgradeable; rotating voters means deploying a fresh
+   policy and re-whitelisting it on the Router.
+
 ### Deploy to BSC Testnet / Mainnet
 
 ```bash

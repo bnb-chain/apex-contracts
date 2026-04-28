@@ -770,6 +770,11 @@
             "internalType": "uint256",
             "name": "submittedAt",
             "type": "uint256"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "deliverable",
+            "type": "bytes32"
           }
         ],
         "internalType": "struct IACP.Job",
@@ -894,6 +899,11 @@
         "internalType": "uint256",
         "name": "submittedAt",
         "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "deliverable",
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",

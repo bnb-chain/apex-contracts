@@ -53,9 +53,35 @@ contract AgenticCommerceUpgradeable is
     // Storage (flat upgradeable layout; append-only)
     // ---------------------------------------------------------------
 
-    /// @notice ERC-20 escrow / settlement token. Set once in {initialize}.
+    /// @notice ERC-20 escrow / settlement token. Set once in {initialize}
+    ///         and immutable thereafter.
     /// @dev    Stored as `address` so the auto-generated public getter
     ///         matches `IACP.paymentToken()` exactly.
+    ///
+    ///         **TOKEN CONTRACT REQUIREMENTS — deployer responsibility
+    ///         (audit I01):** `paymentToken` MUST be a standard ERC-20
+    ///         whose `transfer` / `transferFrom` deliver exactly the
+    ///         requested amount and whose held balance does not
+    ///         spontaneously change between calls.
+    ///
+    ///         The kernel does NOT reconcile pre/post `balanceOf` in
+    ///         {fund}; `job.budget` is taken at face value. Deploying
+    ///         against any of the following will cause silent escrow
+    ///         drift and revert at settlement (clients still recover
+    ///         escrow via {claimRefund} after `expiredAt`, but providers
+    ///         and treasury cannot collect):
+    ///
+    ///           * fee-on-transfer (a.k.a. reflection / deflationary)
+    ///             tokens;
+    ///           * rebasing / elastic-supply tokens;
+    ///           * tokens with blocklists or fee toggles that mid-
+    ///             lifecycle change `transfer` semantics;
+    ///           * any token whose `balanceOf(address)` can decrease
+    ///             without an outgoing `transfer` from `address`.
+    ///
+    ///         Vetted choices on BNB Chain include USDT, USDC, and
+    ///         other audited stablecoins. Confirm against the token's
+    ///         source before {initialize}.
     address public paymentToken;
 
     /// @notice Platform fee in basis points (0..10_000).
@@ -151,9 +177,15 @@ contract AgenticCommerceUpgradeable is
     }
 
     /// @notice One-time initialiser run through the proxy.
-    /// @param paymentToken_ ERC-20 escrow token (immutable after this call).
+    /// @param paymentToken_ ERC-20 escrow token. Immutable after this
+    ///                      call. **MUST** be a standard ERC-20 — see
+    ///                      the token-class requirements on {paymentToken}
+    ///                      (audit I01). Misconfiguration is a deployer
+    ///                      bug, not a kernel one.
     /// @param treasury_     Platform fee recipient.
-    /// @param owner_        Initial owner (RECOMMENDED multisig).
+    /// @param owner_        Initial owner. Production deployments MUST
+    ///                      use a multisig fronted by a TimelockController
+    ///                      (audit I08; see `docs/design.md` §6 R1).
     function initialize(address paymentToken_, address treasury_, address owner_) external initializer {
         if (paymentToken_ == address(0) || treasury_ == address(0) || owner_ == address(0)) {
             revert ZeroAddress();
@@ -284,7 +316,8 @@ contract AgenticCommerceUpgradeable is
             expiredAt: expiredAt,
             status: JobStatus.Open,
             hook: hook,
-            submittedAt: 0
+            submittedAt: 0,
+            deliverable: bytes32(0)
         });
         emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt, hook);
 
@@ -341,6 +374,10 @@ contract AgenticCommerceUpgradeable is
 
     /// @notice Client deposits escrow equal to `expectedBudget`. Reverts if
     ///         `job.budget != expectedBudget` (front-running guard).
+    /// @dev    Performs a single `safeTransferFrom(client, this, budget)`
+    ///         and trusts the post-transfer balance to equal `budget`.
+    ///         See {paymentToken} for the token-class requirements that
+    ///         make this assumption sound (audit I01).
     function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
@@ -377,6 +414,11 @@ contract AgenticCommerceUpgradeable is
         _beforeHook(job.hook, jobId, this.submit.selector, hookData);
         job.status = JobStatus.Submitted;
         job.submittedAt = block.timestamp;
+        // Persist `deliverable` to job storage (audit I05) so on-chain
+        // consumers (future verifying policies, arbitration contracts,
+        // reputation registries) can read the deliverable directly via
+        // {getJob}, without reconstructing it from the JobSubmitted event.
+        job.deliverable = deliverable;
         _afterHook(job.hook, jobId, this.submit.selector, hookData);
 
         emit JobSubmitted(jobId, job.provider, deliverable);

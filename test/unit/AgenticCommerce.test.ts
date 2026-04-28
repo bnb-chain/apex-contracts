@@ -777,6 +777,41 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(ev.amount, DEFAULT_BUDGET);
     });
 
+    // [I05] submit() must persist the provider's deliverable hash to
+    //       Job.deliverable in addition to the JobSubmitted event so that
+    //       on-chain consumers (verifying policies, arbitration contracts,
+    //       reputation registries) can read it via getJob without rebuilding
+    //       state from logs.
+    it("[I05] submit persists deliverable to Job.deliverable", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "I05 regression",
+        noopHookAddr,
+      ]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+
+      const jobBeforeSubmit = await commerce.read.getJob([1n]);
+      assert.equal(jobBeforeSubmit.deliverable, ZERO_BYTES32);
+
+      const deliverable = keccak256(toBytes("I05 deliverable"));
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.submit([1n, deliverable, "0x"]);
+
+      const jobAfterSubmit = await commerce.read.getJob([1n]);
+      assert.equal(jobAfterSubmit.status, JobStatus.Submitted);
+      assert.equal(jobAfterSubmit.deliverable, deliverable);
+    });
+
     // [I07] platformFeeBP is now capped at 10% in-contract, so even a
     //       compromised owner cannot route more than that to the treasury.
     it("[I07] setPlatformFee caps feeBP at MAX_PLATFORM_FEE_BP (1_000)", async () => {

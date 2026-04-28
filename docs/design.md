@@ -285,12 +285,11 @@ expectedBudget` as front-running protection.
     (audit I09; documented as Delta 1.3 in the compliance doc).
   - `submit` rejects `block.timestamp >= job.expiredAt` with
     `WrongStatus`, mirroring `fund` (audit L02). Late submissions
-    cannot be front-run by `claimRefund`. `deliverable` is emitted in
-    `JobSubmitted` but **not** persisted to the `Job` struct (audit
-    I05 / second half) — the kernel never re-reads it, and off-chain
-    indexers reconstruct it from the event. Re-evaluate in v2 if a
-    policy starts requiring on-chain verification of the deliverable
-    bytes.
+    cannot be front-run by `claimRefund`. The `deliverable` hash is
+    persisted to the `Job` struct in addition to the `JobSubmitted`
+    event (audit I05) so on-chain consumers — verifying policies,
+    arbitration contracts, reputation registries — can read it
+    directly via `getJob(jobId)` without rebuilding state from logs.
 - **Events:** aligned with the ERC-8183 standard set. Two deliberate
   ABI superset deviations:
   - `JobCreated` appends a non-indexed `hook` address.
@@ -303,13 +302,28 @@ expectedBudget` as front-running protection.
   (10%, audit I07) — even a compromised owner cannot route more than
   10% of any future settlement to the treasury. The cap is a
   `constant`, so raising it requires a UUPS upgrade.
-- **Token assumption (audit I01):** the kernel supports **plain
-  ERC-20s only**. Fee-on-transfer, rebasing, and otherwise
-  balance-mutating tokens are out of scope: `fund` does not reconcile
-  pre/post balances, so the budget tracked in storage may diverge from
-  the actual escrow held by the kernel. Deployers MUST configure
-  `paymentToken` to a vetted standard ERC-20 (e.g. USDT, USDC, BUSD on
-  BNB Chain). Adding a balance-delta path is a v2 candidate.
+- **Token assumption — deploy contract, not a v2 todo (audit I01):**
+  the kernel supports **plain ERC-20s only**. `fund` performs a single
+  `safeTransferFrom(client, this, budget)` and trusts the post-transfer
+  balance to equal `budget`; it does NOT reconcile pre/post `balanceOf`.
+  This is intentional v1 scope. The following classes will cause
+  silent escrow drift and revert at settlement (clients still recover
+  via `claimRefund` after `expiredAt`, but providers and treasury
+  cannot collect):
+  - fee-on-transfer / reflection / deflationary tokens,
+  - rebasing / elastic-supply tokens,
+  - tokens with mid-lifecycle blocklists or fee toggles,
+  - any token whose `balanceOf(address)` can decrease without an
+    outgoing `transfer` from `address`.
+
+  Confirming `paymentToken` against the token's source is part of the
+  pre-deploy checklist in `README.md`. The runtime warning lives on
+  the `paymentToken` storage NatSpec and on the `initialize` and
+  `fund` function NatSpec, so etherscan / IDE / SDK introspection all
+  surface it. Adding `balanceOf`-delta reconciliation in `fund` is
+  out of scope for v1 (BNB Chain stablecoins do not need it; the gas
+  cost is not justified for the typical case).
+
 - **Not implemented (intentional):** `fundWithPermit`, ERC-2771
   meta-transactions, `AccessControl` multi-role (we use `Ownable2Step`),
   hook whitelist, `evaluatorFeeBP`.
@@ -716,11 +730,6 @@ No blocking issues. Revisit in v2:
 - [ ] Adapter for third-party ERC-8183 kernels.
 - [ ] "Freeze + drain" admin path for emergency migration.
 - [ ] ERC-2771 meta-transactions if agent relayers become a requirement.
-- [ ] On-chain `deliverable` storage on the `Job` struct (audit I05;
-      currently event-only — adding a field is an interface + storage
-      layout change requiring a UUPS audit).
-- [ ] Fee-on-transfer / rebasing token support (audit I01) via
-      pre/post `balanceOf` reconciliation in `fund`.
 
 ---
 
