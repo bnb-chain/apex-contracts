@@ -38,6 +38,15 @@ export async function deployMockToken(viem: any) {
 }
 
 /**
+ * Deploy a no-op IACPHook. Used as a benign placeholder hook in tests where
+ * the kernel requires a non-zero hook (post-audit L05) but the test does not
+ * exercise hook semantics.
+ */
+export async function deployNoopHook(viem: any) {
+  return viem.deployContract("NoopHook", []);
+}
+
+/**
  * Deploy AgenticCommerceUpgradeable behind an ERC1967Proxy.
  */
 export async function deployCommerce(

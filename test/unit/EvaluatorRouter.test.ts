@@ -8,7 +8,6 @@ import {
   parseAbiParameters,
   parseEventLogs,
   toBytes,
-  zeroAddress,
 } from "viem";
 
 import {
@@ -16,6 +15,7 @@ import {
   DEFAULT_BUDGET,
   DEFAULT_DISPUTE_WINDOW,
   deployStack,
+  deployNoopHook,
   blockTimestamp,
   advanceSeconds,
   createFundedSubmittedJob,
@@ -192,13 +192,18 @@ describe("EvaluatorRouterUpgradeable", async () => {
 
     it("rejects job whose hook != router", async () => {
       const ctx = await setup();
+      // After audit L05 the kernel rejects hook == address(0) at createJob.
+      // Use a benign IACPHook implementation so the job creates successfully
+      // but `job.hook != router`, which is what registerJob is meant to
+      // reject.
+      const noopHook = await deployNoopHook(viem);
       const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         ctx.router.address,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHook.address,
       ]);
       const routerAsClient = await asRouter(ctx.router.address, clientW);
       await assert.rejects(

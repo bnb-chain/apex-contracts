@@ -9,6 +9,7 @@ import {
   DEFAULT_DISPUTE_WINDOW,
   deployStack,
   advanceSeconds,
+  blockTimestamp,
   createFundedSubmittedJob,
 } from "./helpers.js";
 
@@ -18,6 +19,7 @@ describe("OptimisticPolicy", async () => {
   const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W, voter3W] =
     await viem.getWalletClients();
   const deployer = getAddress(deployerW.account.address);
+  const provider = getAddress(providerW.account.address);
   const treasury = getAddress(treasuryW.account.address);
   const voter1 = getAddress(voter1W.account.address);
   const voter2 = getAddress(voter2W.account.address);
@@ -318,6 +320,158 @@ describe("OptimisticPolicy", async () => {
       assert.equal(qr2.length, 1);
       assert.equal(qr2[0].args.jobId, jobId);
       assert.equal(qr2[0].args.rejectVotes, 2);
+    });
+  });
+
+  // ==================================================================
+  // Audit regressions
+  // ==================================================================
+
+  describe("audit regressions", () => {
+    // [H01] Without the fall-through, a zero-cost dispute could pin check()
+    //       at PENDING forever. After the fix, an unresolved dispute auto-
+    //       approves once the disputeWindow elapses.
+    it("[H01] disputed-without-quorum auto-approves after window elapses", async () => {
+      const ctx = await setup(); // quorum = 2
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+
+      const policyAsClient = await asPolicy(ctx.policy.address, clientW);
+      await policyAsClient.write.dispute([jobId]);
+
+      let [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Pending, "before window elapses");
+
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+
+      [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Approve, "voters silent past window → approve");
+
+      // settle now pays the provider, recovering from the H01 attack.
+      await ctx.router.write.settle([jobId, "0x"]);
+      assert.equal(await ctx.token.read.balanceOf([provider]), DEFAULT_BUDGET);
+    });
+
+    // [L07] Submitting close enough to expiry that the dispute window cannot
+    //       fully fit must revert through the kernel.
+    it("[L07] submit reverts SubmissionTooLate if dispute window cannot fit before expiry", async () => {
+      const ctx = await setup();
+      const providerAddr = getAddress(providerW.account.address);
+      const clientAddr = getAddress(clientW.account.address);
+      // expiredAt comfortably past the kernel's 5-min minimum, but still
+      // shorter than the 1h disputeWindow → onSubmitted's L07 guard fires.
+      // Hardhat auto-advances block.timestamp by ~1s/tx, so use a safe 600s.
+      const expiredAt = (await blockTimestamp(viem)) + 600n;
+
+      const commerceAsClient = await viem.getContractAt(
+        "AgenticCommerceUpgradeable",
+        ctx.commerce.address,
+        { client: { wallet: clientW } },
+      );
+      await commerceAsClient.write.createJob([
+        providerAddr,
+        ctx.router.address,
+        expiredAt,
+        "L07 regression",
+        ctx.router.address,
+      ]);
+      const jobId = 1n;
+
+      const routerAsClient = await viem.getContractAt(
+        "EvaluatorRouterUpgradeable",
+        ctx.router.address,
+        { client: { wallet: clientW } },
+      );
+      await routerAsClient.write.registerJob([jobId, ctx.policy.address]);
+      await commerceAsClient.write.setBudget([jobId, DEFAULT_BUDGET, "0x"]);
+      await ctx.token.write.mint([clientAddr, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", ctx.token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([ctx.commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([jobId, DEFAULT_BUDGET, "0x"]);
+
+      const commerceAsProvider = await viem.getContractAt(
+        "AgenticCommerceUpgradeable",
+        ctx.commerce.address,
+        { client: { wallet: providerW } },
+      );
+      const deliverable = keccak256(toBytes("L07"));
+      // submit fails — onSubmitted's L07 guard bubbles back up through the kernel.
+      await assert.rejects(
+        commerceAsProvider.write.submit([jobId, deliverable, "0x"]),
+        /SubmissionTooLate/,
+      );
+    });
+
+    // [L08] Quorum changes between dispute() and settle must not move the
+    //       goalposts on the in-flight dispute.
+    it("[L08] dispute snapshots voteQuorum; later admin changes don't affect this dispute", async () => {
+      const ctx = await setup(); // quorum = 2, voters = [voter1, voter2]
+      // Add a third voter so we can later raise the live quorum to 3.
+      await ctx.policy.write.addVoter([voter3]);
+
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+
+      const policyAsClient = await asPolicy(ctx.policy.address, clientW);
+      await policyAsClient.write.dispute([jobId]);
+      // Snapshot was taken at quorum=2 at the time of dispute.
+      assert.equal(await ctx.policy.read.disputeQuorumSnapshot([jobId]), 2);
+
+      // Admin raises quorum to 3 (shifting the goalposts post-dispute).
+      await ctx.policy.write.setQuorum([3]);
+      assert.equal(await ctx.policy.read.voteQuorum(), 3);
+
+      // 2 votes are still enough for THIS dispute because we use the snapshot.
+      const policyAsV1 = await asPolicy(ctx.policy.address, voter1W);
+      const policyAsV2 = await asPolicy(ctx.policy.address, voter2W);
+      await policyAsV1.write.voteReject([jobId]);
+      await policyAsV2.write.voteReject([jobId]);
+
+      const [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Reject);
+    });
+
+    // [I04] Voting on a job that is no longer Submitted is wasted gas and
+    //       pollutes events. The kernel-status guard rejects it up front.
+    it("[I04] voteReject on a non-Submitted job reverts WrongJobStatus", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      // Drive job → Completed via the silent-approve path.
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+      await ctx.router.write.settle([jobId, "0x"]);
+
+      // Even if a dispute is impossible (job already Completed), if we
+      // imagine a race where dispute had been raised before settlement, a
+      // subsequent vote on the now-terminal job must be rejected. We
+      // simulate this by manually flipping `disputed` via a fresh job that
+      // gets disputed and then settled before voting.
+      const ctx2 = await setup();
+      const { jobId: jobId2 } = await createFundedSubmittedJob(viem, {
+        ...ctx2,
+        client: clientW,
+        provider: providerW,
+      });
+      const policyAsClient2 = await asPolicy(ctx2.policy.address, clientW);
+      await policyAsClient2.write.dispute([jobId2]);
+
+      // Reach the disputeWindow → disputed-without-quorum now auto-approves.
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+      await ctx2.router.write.settle([jobId2, "0x"]); // → Completed
+
+      const policyAsV1 = await asPolicy(ctx2.policy.address, voter1W);
+      await assert.rejects(policyAsV1.write.voteReject([jobId2]), /WrongJobStatus/);
     });
   });
 });

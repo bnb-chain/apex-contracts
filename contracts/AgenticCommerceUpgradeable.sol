@@ -36,6 +36,11 @@ contract AgenticCommerceUpgradeable is
     /// @notice Basis-point denominator. `feeBP = 10_000` = 100%.
     uint256 public constant BP_DENOMINATOR = 10_000;
 
+    /// @notice Maximum lifetime of a job from creation to {claimRefund}
+    ///         eligibility. Prevents `expiredAt` from being set so far in the
+    ///         future that the kernel's permissionless refund path is
+    ///         effectively unreachable, locking escrow forever (audit L01).
+    uint256 public constant MAX_EXPIRY_DURATION = 365 days;
 
     // ---------------------------------------------------------------
     // Storage (flat upgradeable layout; append-only)
@@ -99,12 +104,22 @@ contract AgenticCommerceUpgradeable is
     error WrongStatus();
     error Unauthorized();
     error ExpiryTooShort();
+    /// @notice Thrown by {createJob} when `expiredAt` is further in the future
+    ///         than {MAX_EXPIRY_DURATION} (audit L01).
+    error ExpiryTooLong();
     error ZeroBudget();
     error BudgetMismatch();
     error ProviderNotSet();
     error FeeTooHigh();
     error HookMissingInterface();
     error HookCallFailed();
+    /// @notice Thrown by {createJob} when `hook == address(0)`. Every job MUST
+    ///         have a hook contract — the zero address bypasses
+    ///         `_beforeHook` / `_afterHook` and would silently disable any
+    ///         hook-enforced policy gating (audit L05). The runtime
+    ///         `hook == 0` skip in `_beforeHook` / `_afterHook` is retained
+    ///         as defence-in-depth even though no new job can reach it.
+    error HookRequired();
 
     // ---------------------------------------------------------------
     // Initialisation
@@ -210,9 +225,13 @@ contract AgenticCommerceUpgradeable is
     ///                      via {setProvider}).
     /// @param  evaluator    Evaluator address. MUST NOT be zero.
     /// @param  expiredAt    Unix timestamp at which the job becomes refundable.
+    ///                      MUST be at least 5 minutes in the future and at
+    ///                      most {MAX_EXPIRY_DURATION} away (audit L01).
     /// @param  description  Human-readable description.
-    /// @param  hook         Optional hook address. If non-zero MUST implement
-    ///                      {IACPHook} per ERC-165.
+    /// @param  hook         Hook contract address. MUST be non-zero and MUST
+    ///                      implement {IACPHook} per ERC-165 (audit L05).
+    ///                      Use a no-op `IACPHook` when an evaluator does not
+    ///                      need pre/post-action callbacks.
     function createJob(
         address provider,
         address evaluator,
@@ -222,10 +241,10 @@ contract AgenticCommerceUpgradeable is
     ) external nonReentrant whenNotPaused returns (uint256 jobId) {
         if (evaluator == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
-        if (hook != address(0)) {
-            if (!ERC165Checker.supportsInterface(hook, type(IACPHook).interfaceId)) {
-                revert HookMissingInterface();
-            }
+        if (expiredAt > block.timestamp + MAX_EXPIRY_DURATION) revert ExpiryTooLong();
+        if (hook == address(0)) revert HookRequired();
+        if (!ERC165Checker.supportsInterface(hook, type(IACPHook).interfaceId)) {
+            revert HookMissingInterface();
         }
 
         unchecked {
@@ -312,11 +331,17 @@ contract AgenticCommerceUpgradeable is
 
     /// @notice Provider submits the deliverable hash, moving the job to the
     ///         `Submitted` state.
+    /// @dev    Reverts with `WrongStatus` if `block.timestamp >= expiredAt`,
+    ///         mirroring the existing guard in {fund}. Submitting after
+    ///         expiry would let the client (or any observer) front-run the
+    ///         provider via {claimRefund} and walk away with both the
+    ///         deliverable and the escrow (audit L02).
     function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Funded) revert WrongStatus();
         if (msg.sender != job.provider) revert Unauthorized();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
 
         bytes memory hookData = abi.encode(deliverable, optParams);
         _beforeHook(job.hook, jobId, this.submit.selector, hookData);

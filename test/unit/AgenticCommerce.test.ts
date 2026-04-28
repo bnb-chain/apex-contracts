@@ -9,6 +9,7 @@ import {
   ZERO_BYTES32,
   deployCommerce,
   deployMockToken,
+  deployNoopHook,
   blockTimestamp,
   advanceSeconds,
 } from "./helpers.js";
@@ -25,6 +26,12 @@ describe("AgenticCommerceUpgradeable", async () => {
   const evaluator = getAddress(evaluatorW.account.address);
   const treasury = getAddress(treasuryW.account.address);
   const other = getAddress(otherW.account.address);
+
+  // Shared no-op IACPHook used as a benign placeholder for tests that don't
+  // exercise hook semantics. Required after audit L05: createJob now rejects
+  // hook == address(0) with `HookRequired`.
+  const noopHook = await deployNoopHook(viem);
+  const noopHookAddr = noopHook.address as `0x${string}`;
 
   async function setup() {
     const token = await deployMockToken(viem);
@@ -109,7 +116,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         expiredAt,
         "Job #1",
-        zeroAddress,
+        noopHookAddr,
       ]);
 
       const job = await commerce.read.getJob([1n]);
@@ -197,7 +204,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setProvider([1n, provider, "0x"]);
       const job = await commerce.read.getJob([1n]);
@@ -212,7 +219,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       const commerceAsOther = await asCommerce(commerce.address, otherW);
       await assert.rejects(commerceAsOther.write.setProvider([1n, provider, "0x"]), /Unauthorized/);
@@ -226,7 +233,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await assert.rejects(commerceAsClient.write.setProvider([1n, other, "0x"]), /WrongStatus/);
     });
@@ -245,7 +252,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
 
       // Client sets.
@@ -269,7 +276,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       const commerceAsOther = await asCommerce(commerce.address, otherW);
       await assert.rejects(
@@ -292,7 +299,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -327,7 +334,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await assert.rejects(commerceAsClient.write.fund([1n, 0n, "0x"]), /ZeroBudget/);
     });
@@ -340,7 +347,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await assert.rejects(
@@ -353,7 +360,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       const { token, commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
       const expiredAt = await futureTs(3600);
-      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", zeroAddress]);
+      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", noopHookAddr]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
       const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
@@ -379,7 +386,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -437,7 +444,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -480,7 +487,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.reject([1n, ZERO_BYTES32, "0x"]);
       const job = await commerce.read.getJob([1n]);
@@ -495,7 +502,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -529,7 +536,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       });
       const commerceAsClient = await asCommerce(commerce.address, clientW);
       const expiredAt = await futureTs(3600);
-      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", zeroAddress]);
+      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", noopHookAddr]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
 
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -557,7 +564,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -600,7 +607,6 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(await token.read.balanceOf([client]), DEFAULT_BUDGET);
       assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Expired);
     });
-
   });
 
   // ==================================================================
@@ -622,6 +628,82 @@ describe("AgenticCommerceUpgradeable", async () => {
     it("setPlatformFee rejects fee > 10000", async () => {
       const { commerce } = await setup();
       await assert.rejects(commerce.write.setPlatformFee([10_001n, treasury]), /FeeTooHigh/);
+    });
+  });
+
+  // ==================================================================
+  // Audit regressions
+  // ==================================================================
+
+  describe("audit regressions", () => {
+    // [L01] expiredAt must be capped to MAX_EXPIRY_DURATION; without the
+    //       cap, a misconfigured client could lock escrow until uint256
+    //       overflow, leaving no on-chain refund path.
+    it("[L01] createJob rejects expiredAt > now + 365 days with ExpiryTooLong", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      // 1 hour past the cap; well beyond hardhat's per-tx 1s auto-advance.
+      const tooFar = (await blockTimestamp(viem)) + 365n * 86_400n + 3600n;
+      await assert.rejects(
+        commerceAsClient.write.createJob([
+          provider,
+          evaluator,
+          tooFar,
+          "L01 regression",
+          noopHookAddr,
+        ]),
+        /ExpiryTooLong/,
+      );
+    });
+
+    // [L02] submit() must mirror fund()'s expiry guard. Without it, a
+    //       provider submitting after expiredAt can be immediately front-run
+    //       by claimRefund.
+    it("[L02] submit() reverts WrongStatus once block.timestamp >= expiredAt", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      const expiredAt = await futureTs(3600);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        expiredAt,
+        "L02 regression",
+        noopHookAddr,
+      ]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+
+      // Fast-forward past expiredAt so the provider is racing the refund path.
+      await advanceSeconds(viem, 3700);
+
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await assert.rejects(
+        commerceAsProvider.write.submit([1n, keccak256(toBytes("late")), "0x"]),
+        /WrongStatus/,
+      );
+    });
+
+    // [L05] hook == address(0) bypasses _beforeHook / _afterHook entirely,
+    //       which silently disables any policy-side gating. createJob must
+    //       reject this configuration up front.
+    it("[L05] createJob rejects hook == address(0) with HookRequired", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await assert.rejects(
+        commerceAsClient.write.createJob([
+          provider,
+          evaluator,
+          await futureTs(3600),
+          "L05 regression",
+          zeroAddress,
+        ]),
+        /HookRequired/,
+      );
     });
   });
 });

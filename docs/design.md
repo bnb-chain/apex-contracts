@@ -170,28 +170,44 @@ Day 4   │ Anyone (typically Client)
         │             └─ 100 USDC → Client ✅
 ```
 
-> Rule 1 (`disputed && rejectVotes ≥ voteQuorum → Reject`) does **not**
-> require `disputeWindow` to elapse first. Once quorum is reached, `settle`
-> can reject immediately.
+> Rule 1 (`disputed && rejectVotes ≥ snapshot quorum → Reject`) does
+> **not** require `disputeWindow` to elapse first. Once quorum is
+> reached, `settle` can reject immediately. The "snapshot quorum" is the
+> value of `voteQuorum` recorded at the time `dispute()` was called —
+> later admin updates do not change the rejection threshold for a
+> dispute already in flight (audit L08).
 
-### 4.4 · Flow C — Disputed stalemate → Expired (fallback)
+### 4.4 · Flow C — Disputed stalemate → race (auto-approve OR Expired)
 
 ```
-Day 0-1 │ … same as Flow A (expiredAt = Day 30)
-Day 2   │ Client disputes
-Day 2-30│ Only 1 voter casts voteReject (quorum = 3, never reached)
+Day 0-1  │ … same as Flow A (expiredAt = Day 30, disputeWindow = 3d)
+Day 2    │ Client disputes
+Day 2-5  │ Only 1 voter casts voteReject (quorum = 3, never reached)
 
-Day 4   │ Anyone → router.settle(jobId, "")
-        │   policy.check() → (Pending, 0)
-        │   router reverts with NotDecided       ← Provider cannot pull
-
-Day 4-30│ Deadlock. No one can advance the state machine.
-
-Day 30  │ Anyone (typically Client)
-        │   └─ commerce.claimRefund(jobId)                       [Expired]
-        │        └─ 100 USDC → Client ✅
-        │   (Policy state is orphaned but harmless; jobId never reused)
+Day 5    │ disputeWindow elapses with quorum unreached.
+         │ policy.check() falls through to the default-approve branch:
+         │   (Approve, REASON_APPROVED)        ← audit H01: silence by
+         │                                       voters approves regardless
+         │                                       of whether dispute was raised
+Day 5-30 │ Race window:
+         │   Anyone (typically Provider) → router.settle(jobId, "")
+         │     → commerce.complete(jobId, ...)                  [Completed]
+         │     → 95 USDC → Provider ✅ (5% fee → treasury)
+         │ OR
+         │   Anyone (typically Client)  → commerce.claimRefund(jobId)
+         │     → 100 USDC → Client ✅                            [Expired]
+         │
+         │ Whoever moves first wins. Providers MUST settle before
+         │ expiredAt to collect; otherwise the client can refund.
 ```
+
+> Rationale for the auto-approve fall-through (audit H01): without it,
+> a zero-cost `dispute()` would pin every legitimately submitted job at
+> PENDING forever, letting the client recover the escrow at expiry while
+> the provider receives nothing. Treating voter silence as approval —
+> identical to the undisputed path — restores the optimistic game-
+> theoretic balance: a dispute is only effective when voters back it up
+> within the window.
 
 ### 4.5 · Flow D — Cancel while Open
 
@@ -213,13 +229,15 @@ Day 30 │ Anyone → commerce.claimRefund(jobId)                    [Expired]
 
 ### 4.7 · Economic outcomes
 
-| Path                | Client balance | Provider balance | Duration                |
-| ------------------- | -------------- | ---------------- | ----------------------- |
-| A · Happy           | −100           | +95 (5% fee)     | Min 3 days              |
-| B · Rejected        | 0              | 0                | ≤3 days (prompt voting) |
-| C · Stalemate       | 0              | 0                | Up to `expiredAt`       |
-| D · Open cancel     | 0              | 0                | Immediate               |
-| E · Never submitted | 0              | 0                | Up to `expiredAt`       |
+| Path                                              | Client balance | Provider balance | Duration                |
+| ------------------------------------------------- | -------------- | ---------------- | ----------------------- |
+| A · Happy                                         | −100           | +95 (5% fee)     | Min 3 days              |
+| B · Rejected                                      | 0              | 0                | ≤3 days (prompt voting) |
+| C · Disputed → window elapses → 1st-mover race:   |                |                  |                         |
+| &nbsp;&nbsp;&nbsp;&nbsp;C₁ Provider settles first | −100           | +95 (5% fee)     | After `disputeWindow`   |
+| &nbsp;&nbsp;&nbsp;&nbsp;C₂ Client refunds first   | 0              | 0                | After `expiredAt`       |
+| D · Open cancel                                   | 0              | 0                | Immediate               |
+| E · Never submitted                               | 0              | 0                | After `expiredAt`       |
 
 ---
 
@@ -242,6 +260,13 @@ expectedBudget` as front-running protection.
     the universal escape hatch.
   - Hook dispatch goes through `HOOK_GAS_LIMIT = 1_000_000` and verifies
     `IACPHook` via ERC-165 at `createJob` time.
+  - `createJob` rejects `hook == address(0)` with `HookRequired` (audit L05)
+    and rejects `expiredAt > now + MAX_EXPIRY_DURATION` (`365 days`,
+    audit L01) so escrow can never be locked beyond a well-defined
+    horizon.
+  - `submit` rejects `block.timestamp >= job.expiredAt` with
+    `WrongStatus`, mirroring `fund` (audit L02). Late submissions
+    cannot be front-run by `claimRefund`.
 - **Events:** aligned with the ERC-8183 standard set. Event signatures
   match the normative spec except `JobCreated`, which appends a
   non-indexed `hook` address (matching the ERC reference implementation
@@ -316,35 +341,53 @@ expectedBudget` as front-running protection.
   `(commerce_, router_, admin_, disputeWindow_, initialQuorum_)`. Stores
   `commerce`, `router`, `disputeWindow` as immutable; seeds `admin` and
   `voteQuorum`. `initialQuorum_ == 0` reverts (`QuorumZero`).
-- **Mutable config:** `voteQuorum` (admin-updatable).
+- **Mutable config:** `voteQuorum` (admin-updatable). Live updates
+  do not affect in-flight disputes — see `disputeQuorumSnapshot` below
+  (audit L08).
 - **Per-job state:**
   - `mapping(uint256 => uint64) submittedAt`
   - `mapping(uint256 => bool)   disputed`
   - `mapping(uint256 => uint16) rejectVotes`
+  - `mapping(uint256 => uint16) disputeQuorumSnapshot` — quorum
+    threshold captured at `dispute()` time; used by `check()` /
+    `voteReject()` so admin updates after the dispute is open cannot
+    move the goalposts (audit L08).
   - `mapping(uint256 => mapping(address => bool)) hasVoted`
 - **Voter whitelist:** `mapping(address => bool) isVoter` with
   `uint16 activeVoterCount`.
 - **Functions:**
   - `onSubmitted(jobId, deliverable, optParams)` — router-only.
     `submittedAt[jobId]` is recorded on first call; a second call
-    reverts (`AlreadyInitialised`). `optParams` is accepted for
-    `IPolicy` compatibility and intentionally ignored by the optimistic
-    policy (not persisted to storage).
+    reverts (`AlreadyInitialised`). Reverts with `SubmissionTooLate`
+    when `block.timestamp + disputeWindow > job.expiredAt` so the
+    dispute window is structurally guaranteed to fit before
+    `claimRefund` becomes callable (audit L07). `optParams` is accepted
+    for `IPolicy` compatibility and intentionally ignored by the
+    optimistic policy (not persisted to storage).
   - `dispute(jobId)` — reads `commerce.getJob(jobId)` and requires the
     caller to be `job.client`. Reverts if `submittedAt == 0`
     (`NotSubmitted`), if already disputed (`AlreadyDisputed`), or if the
     dispute window has elapsed (`OutsideDisputeWindow`). Flips `disputed`
-    to `true`.
+    to `true` and snapshots the current `voteQuorum` into
+    `disputeQuorumSnapshot[jobId]` (audit L08).
   - `voteReject(jobId)` — voter-only (`NotVoter`). Requires `disputed ==
-true` (`NotSubmitted`) and first-time voter (`AlreadyVoted`). Records
-    the vote and increments `rejectVotes[jobId]`.
+true` (`NotDisputed`), first-time voter (`AlreadyVoted`), and the
+    kernel job still in `Submitted` state (`WrongJobStatus`, audit
+    I04 — voting on a Completed/Rejected/Expired job has no settlement
+    effect and only wastes gas). Records the vote and increments
+    `rejectVotes[jobId]`. Emits `QuorumReached` exactly on the vote
+    that first crosses `disputeQuorumSnapshot[jobId]`.
   - `check(jobId, evidence)` — router-only (enforced by caller context);
     `view`:
     - `submittedAt == 0` → `(Pending, 0)`
-    - `disputed` branch: `rejectVotes ≥ voteQuorum` →
-      `(Reject, REASON_REJECTED)`, otherwise `(Pending, 0)`.
-    - Non-disputed branch: `now ≥ submittedAt + disputeWindow` →
-      `(Approve, REASON_APPROVED)`, otherwise `(Pending, 0)`.
+    - `disputed && rejectVotes ≥ disputeQuorumSnapshot` →
+      `(Reject, REASON_REJECTED)`.
+    - Otherwise — `now ≥ submittedAt + disputeWindow` →
+      `(Approve, REASON_APPROVED)`. **This is also reached for
+      disputed jobs that fail to muster quorum within the window**
+      (audit H01); silence by voters auto-approves identically to the
+      undisputed path.
+    - Else → `(Pending, 0)`.
   - Admin:
     - `addVoter(addr)` — requires `!isVoter[addr]`; increments
       `activeVoterCount`.
@@ -460,11 +503,18 @@ selector-path tests; (c) Router owner on multisig; (d) clients always have
 
 If the entire voter set is offline or disengaged, every legitimately
 disputed job auto-approves once `disputeWindow` elapses. Silence is
-designed to mean approval but can instead mean absence.
+designed to mean approval but can instead mean absence. This applies
+**both** to undisputed jobs (Flow A) and to disputed jobs whose voters
+fail to reach quorum within the window (Flow C₁ in §4.7) — the audit
+H01 fix makes the two paths identical so a zero-cost dispute cannot
+freeze settlement.
 
 **Mitigations:** (a) this is an accepted trade-off for the optimistic
 design — no on-chain change in v1; (b) run `≥ 3 × voteQuorum` voters with
-24/7 monitoring to lower absence probability; (c) v2 may introduce
+24/7 monitoring to lower absence probability; (c) `disputeWindow` MUST
+fit fully before `expiredAt` — `OptimisticPolicy.onSubmitted` enforces
+this on every submit (audit L07) so a provider cannot be set up to lose
+payment by submitting too close to expiry; (d) v2 may introduce
 per-job `disputeWindow` so clients can opt into mandatory-review jobs.
 
 ### R4 · Voter collusion
@@ -575,6 +625,7 @@ No blocking issues. Revisit in v2:
   hardhat-viem deploys in tests and scripts)
 - `contracts/mocks/MockERC20.sol`
 - `contracts/mocks/RevertingHook.sol`
+- `contracts/mocks/NoopHook.sol`
 - `contracts/mocks/AgenticCommerceV2Mock.sol`
 - `contracts/mocks/EvaluatorRouterV2Mock.sol`
 - `test/helpers.ts`
