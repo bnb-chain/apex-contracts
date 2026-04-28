@@ -48,33 +48,33 @@ use `file:line` against the repository as of `Last reviewed` above.
 
 | Spec function                                                                                                                                      | Our implementation                                             | Status |
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------ |
-| `createJob(provider, evaluator, expiredAt, description, hook)`, provider MAY be zero, evaluator MUST be nonzero, `expiredAt` MUST be in the future | `contracts/AgenticCommerceUpgradeable.sol:248` (`createJob`)   | ✅     |
-| `setProvider(jobId, provider, optParams?)` — client-only, Open-only, provider MUST be currently zero                                               | `contracts/AgenticCommerceUpgradeable.sol:285` (`setProvider`) | ✅     |
-| `setBudget(jobId, amount, optParams?)` — client OR provider, `amount > 0`                                                                          | `contracts/AgenticCommerceUpgradeable.sol:313` (`setBudget`)   | ✅     |
-| `fund(jobId, expectedBudget, optParams?)` — client-only, provider MUST be set, `budget == expectedBudget` front-running guard, nonzero budget      | `contracts/AgenticCommerceUpgradeable.sol:333` (`fund`)        | ✅     |
-| `submit(jobId, deliverable, optParams?)` — provider-only, Funded → Submitted, `block.timestamp < expiredAt`                                        | `contracts/AgenticCommerceUpgradeable.sol:358` (`submit`)      | ✅     |
-| `complete(jobId, reason, optParams?)` — evaluator-only, Submitted → Completed                                                                      | `contracts/AgenticCommerceUpgradeable.sol:376` (`complete`)    | ✅     |
-| `reject(jobId, reason, optParams?)` — client when Open, evaluator when Funded/Submitted                                                            | `contracts/AgenticCommerceUpgradeable.sol:411` (`reject`)      | ✅     |
-| `claimRefund(jobId)` — anyone after `expiredAt`, Funded/Submitted only                                                                             | `contracts/AgenticCommerceUpgradeable.sol:445` (`claimRefund`) | ✅     |
+| `createJob(provider, evaluator, expiredAt, description, hook)`, provider MAY be zero, evaluator MUST be nonzero, `expiredAt` MUST be in the future | `contracts/AgenticCommerceUpgradeable.sol:259` (`createJob`)   | ✅     |
+| `setProvider(jobId, provider, optParams?)` — client-only, Open-only, provider MUST be currently zero                                               | `contracts/AgenticCommerceUpgradeable.sol:296` (`setProvider`) | ✅     |
+| `setBudget(jobId, amount, optParams?)` — client OR provider, `amount > 0`                                                                          | `contracts/AgenticCommerceUpgradeable.sol:324` (`setBudget`)   | ✅     |
+| `fund(jobId, expectedBudget, optParams?)` — client-only, provider MUST be set, `budget == expectedBudget` front-running guard, nonzero budget      | `contracts/AgenticCommerceUpgradeable.sol:344` (`fund`)        | ✅     |
+| `submit(jobId, deliverable, optParams?)` — provider-only, Funded → Submitted, `block.timestamp < expiredAt`                                        | `contracts/AgenticCommerceUpgradeable.sol:369` (`submit`)      | ✅     |
+| `complete(jobId, reason, optParams?)` — evaluator-only, Submitted → Completed                                                                      | `contracts/AgenticCommerceUpgradeable.sol:387` (`complete`)    | ✅     |
+| `reject(jobId, reason, optParams?)` — client when Open, evaluator when Funded/Submitted                                                            | `contracts/AgenticCommerceUpgradeable.sol:422` (`reject`)      | ✅     |
+| `claimRefund(jobId)` — anyone after `expiredAt`, Funded/Submitted only                                                                             | `contracts/AgenticCommerceUpgradeable.sol:456` (`claimRefund`) | ✅     |
 
 ### Fees
 
-| Clause                                                  | Our implementation                                                                                        | Status |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------ |
-| Optional platform fee (basis points) on completion only | `setPlatformFee` at `contracts/AgenticCommerceUpgradeable.sol:175`; fee applied in `complete` at line 376 | ✅     |
-| Fee NOT deducted on refund                              | Refund paths (`reject`, `claimRefund`) transfer full `job.budget`                                         | ✅     |
+| Clause                                                                                                            | Our implementation                                                                                        | Status |
+| ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------ |
+| Optional platform fee (basis points) on completion only, capped at `MAX_PLATFORM_FEE_BP = 1_000` (10%, audit I07) | `setPlatformFee` at `contracts/AgenticCommerceUpgradeable.sol:186`; fee applied in `complete` at line 387 | ✅     |
+| Fee NOT deducted on refund                                                                                        | Refund paths (`reject`, `claimRefund`) transfer full `job.budget`                                         | ✅     |
 
 ### Hooks
 
 | Clause                                                   | Our implementation                                                                                                                                                                                | Status |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
 | `IACPHook` interface (two functions, IERC165)            | `contracts/IACPHook.sol`                                                                                                                                                                          | ✅     |
-| Hook MUST be ERC-165-verified at creation                | `ERC165Checker.supportsInterface` in `createJob` (`AgenticCommerceUpgradeable.sol:259`)                                                                                                           | ✅     |
-| `job.hook == address(0)` skips hook calls                | Early return in `_beforeHook` / `_afterHook` (`AgenticCommerceUpgradeable.sol:195-217`); unreachable for jobs created post-2026-04-28 because `createJob` now reverts on a zero hook (audit L05). | ✅     |
-| Before hooks MAY revert to block an action               | Hook reverts bubble verbatim via assembly in `_bubble` (`:220`)                                                                                                                                   | ✅     |
+| Hook MUST be ERC-165-verified at creation                | `ERC165Checker.supportsInterface` in `createJob` (`AgenticCommerceUpgradeable.sol:270`)                                                                                                           | ✅     |
+| `job.hook == address(0)` skips hook calls                | Early return in `_beforeHook` / `_afterHook` (`AgenticCommerceUpgradeable.sol:206-228`); unreachable for jobs created post-2026-04-28 because `createJob` now reverts on a zero hook (audit L05). | ✅     |
+| Before hooks MAY revert to block an action               | Hook reverts bubble verbatim via assembly in `_bubble` (`:231`)                                                                                                                                   | ✅     |
 | After hooks MAY perform side effects / revert atomically | Same bubble semantics; after-hook reverts undo the core state change                                                                                                                              | ✅     |
-| `claimRefund` MUST NOT be hookable                       | `claimRefund` (`:445`) bypasses `_beforeHook` / `_afterHook` entirely                                                                                                                             | ✅     |
-| Hook gas limit (SHOULD)                                  | `HOOK_GAS_LIMIT = 1_000_000` applied via `.call{gas: ...}` (`:34, :200, :212`)                                                                                                                    | ✅     |
+| `claimRefund` MUST NOT be hookable                       | `claimRefund` (`:456`) bypasses `_beforeHook` / `_afterHook` entirely                                                                                                                             | ✅     |
+| Hook gas limit (SHOULD)                                  | `HOOK_GAS_LIMIT = 1_000_000` applied via `.call{gas: ...}` (`:34, :211, :223`)                                                                                                                    | ✅     |
 
 ### Hook data encoding
 
@@ -83,12 +83,12 @@ Spec table (§Hooks / Data encoding) → code location in
 
 | Selector      | Spec encoding                                      | Code anchor                                 | Status |
 | ------------- | -------------------------------------------------- | ------------------------------------------- | ------ |
-| `setProvider` | `abi.encode(address provider, bytes optParams)`    | `:297` `abi.encode(provider_, optParams)`   | ✅     |
-| `setBudget`   | `abi.encode(uint256 amount, bytes optParams)`      | `:322` `abi.encode(amount, optParams)`      | ✅     |
-| `fund`        | `optParams` (raw bytes)                            | `:341` raw `optParams` passed through       | ✅     |
-| `submit`      | `abi.encode(bytes32 deliverable, bytes optParams)` | `:365` `abi.encode(deliverable, optParams)` | ✅     |
-| `complete`    | `abi.encode(bytes32 reason, bytes optParams)`      | `:386` `abi.encode(reason, optParams)`      | ✅     |
-| `reject`      | `abi.encode(bytes32 reason, bytes optParams)`      | `:428` `abi.encode(reason, optParams)`      | ✅     |
+| `setProvider` | `abi.encode(address provider, bytes optParams)`    | `:308` `abi.encode(provider_, optParams)`   | ✅     |
+| `setBudget`   | `abi.encode(uint256 amount, bytes optParams)`      | `:333` `abi.encode(amount, optParams)`      | ✅     |
+| `fund`        | `optParams` (raw bytes)                            | `:352` raw `optParams` passed through       | ✅     |
+| `submit`      | `abi.encode(bytes32 deliverable, bytes optParams)` | `:376` `abi.encode(deliverable, optParams)` | ✅     |
+| `complete`    | `abi.encode(bytes32 reason, bytes optParams)`      | `:397` `abi.encode(reason, optParams)`      | ✅     |
+| `reject`      | `abi.encode(bytes32 reason, bytes optParams)`      | `:439` `abi.encode(reason, optParams)`      | ✅     |
 
 ### Events
 
@@ -97,16 +97,16 @@ nine are emitted by the kernel:
 
 | Spec event                                                  | Our implementation                                      | Status |
 | ----------------------------------------------------------- | ------------------------------------------------------- | ------ |
-| `JobCreated(jobId, client, provider, evaluator, expiredAt)` | `AgenticCommerceUpgradeable.sol:79` (adds `hook` field) | ✅     |
-| `ProviderSet(jobId, provider)`                              | `:87`                                                   | ✅     |
-| `BudgetSet(jobId, amount)`                                  | `:88`                                                   | ✅     |
-| `JobFunded(jobId, client, amount)`                          | `:97` (adds `indexed provider`)                         | ✅     |
-| `JobSubmitted(jobId, provider, deliverable)`                | `:98`                                                   | ✅     |
-| `JobCompleted(jobId, evaluator, reason)`                    | `:99`                                                   | ✅     |
-| `JobRejected(jobId, rejector, reason)`                      | `:100`                                                  | ✅     |
-| `JobExpired(jobId)`                                         | `:101`                                                  | ✅     |
-| `PaymentReleased(jobId, provider, amount)`                  | `:102`                                                  | ✅     |
-| `Refunded(jobId, client, amount)`                           | `:103`                                                  | ✅     |
+| `JobCreated(jobId, client, provider, evaluator, expiredAt)` | `AgenticCommerceUpgradeable.sol:86` (adds `hook` field) | ✅     |
+| `ProviderSet(jobId, provider)`                              | `:94`                                                   | ✅     |
+| `BudgetSet(jobId, amount)`                                  | `:95`                                                   | ✅     |
+| `JobFunded(jobId, client, amount)`                          | `:104` (adds `indexed provider`)                        | ✅     |
+| `JobSubmitted(jobId, provider, deliverable)`                | `:105`                                                  | ✅     |
+| `JobCompleted(jobId, evaluator, reason)`                    | `:106`                                                  | ✅     |
+| `JobRejected(jobId, rejector, reason)`                      | `:107`                                                  | ✅     |
+| `JobExpired(jobId)`                                         | `:108`                                                  | ✅     |
+| `PaymentReleased(jobId, provider, amount)`                  | `:109`                                                  | ✅     |
+| `Refunded(jobId, client, amount)`                           | `:110`                                                  | ✅     |
 
 ### Security considerations (spec §Security Considerations)
 
@@ -114,7 +114,7 @@ nine are emitted by the kernel:
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | ------ |
 | Reentrancy guard on token-transferring functions | `ReentrancyGuardTransient` + `nonReentrant` on every core function                                             | ✅     |
 | SafeERC20 for transfers                          | `using SafeERC20 for IERC20` throughout                                                                        | ✅     |
-| Evaluator MUST be set at creation                | `createJob` reverts on `evaluator == address(0)` (`:255`)                                                      | ✅     |
+| Evaluator MUST be set at creation                | `createJob` reverts on `evaluator == address(0)` (`:266`)                                                      | ✅     |
 | Single payment token per contract                | `paymentToken` set once in `initialize`; no per-job token                                                      | ✅     |
 | Hook gas limit (SHOULD)                          | `HOOK_GAS_LIMIT = 1_000_000`                                                                                   | ✅     |
 | Hooks MUST NOT modify core escrow state directly | Kernel uses internal writes only; hooks receive `jobId + selector + data` and cannot call kernel state setters | ✅     |
@@ -134,14 +134,14 @@ feature, or an explicitly-deferred optional extension.
    except where doing so would silently drop information (`setProvider`
    and `fund`), in which case we follow the normative text:
 
-- `**JobCreated` adds a non-indexed `hook` field\*\* (`:79-86`). Our
+- `**JobCreated` adds a non-indexed `hook` field\*\* (`:86-93`). Our
   topic0 is
   `keccak256("JobCreated(uint256,address,address,address,uint256,address)")`.
   Indexers wired to the normative 5-parameter signature will NOT
   receive this event; ref-impl-ABI indexers WILL. Removing the field
   on a future UUPS upgrade is an ABI-only, storage-safe change if
   strict normative compatibility is later required.
-- `**JobFunded` adds an indexed `provider` topic\*\* (`:89`). Topic0
+- `**JobFunded` adds an indexed `provider` topic\*\* (`:104`). Topic0
   becomes `keccak256("JobFunded(uint256,address,address,uint256)")`,
   which is a superset of the normative
   `JobFunded(uint256,address,uint256)` shape. The extra topic lets a
@@ -149,9 +149,15 @@ feature, or an explicitly-deferred optional extension.
   it, without joining against `JobCreated` (audit I03). Indexers
   wired to the normative 3-parameter signature will NOT receive
   this event; ref-impl-ABI indexers (which carry `provider`) WILL.
-- `**createJob` invokes `_afterHook`\*\* (`:280`) despite the spec's
-  Hookable table omitting `createJob`. Mirrors the reference
-  implementation.
+- `**createJob` invokes `_afterHook` only\*\* (`:291`). Spec's
+  Hookable table omits `createJob`; the reference implementation
+  invokes a post-action hook here. We follow the reference impl
+  but **deliberately omit `_beforeHook`** (audit I09): a
+  `beforeAction` here would let the hook veto its own installation,
+  which is not a useful security primitive (the kernel has not yet
+  bound the hook so any veto is a self-DoS). Hooks observing job
+  creation receive an `afterAction` callback exactly once, after
+  the kernel state write commits.
 - `**setProvider` / `fund` match the normative text, not the
   reference implementation.\*\* Our selectors are
   `setProvider(uint256,address,bytes)` and
@@ -200,13 +206,32 @@ upgrade". The kernel itself still satisfies all `MUST` clauses.
 
 ## Change Log
 
-- **2026-04-28** — Audit fixes (BNBChain APEX Contracts Upgrade Audit)
-  landed. Spec-compatible kernel tightenings: `MAX_EXPIRY_DURATION = 365
-days` upper-bounds `expiredAt` (`ExpiryTooLong`, audit L01); `submit`
-  now mirrors `fund`'s `block.timestamp >= expiredAt` guard (audit L02);
-  `createJob` rejects `hook == address(0)` with `HookRequired`, so every
-  job has a real ERC-165 hook (audit L05). The spec still permits the
-  zero hook (kernel skips the call), but rejecting at creation closes a
+- **2026-04-28** (PR-3) — Final batch of audit fixes (P2). Kernel
+  layer: `MAX_PLATFORM_FEE_BP = 1_000` hard-caps `setPlatformFee` at
+  10% (audit I07); `setProvider` reverts with `ProviderAlreadySet`
+  instead of the generic `WrongStatus` (audit I05 / error-name half).
+  Router layer: `RouterStorage` appends `jobInflightCount`, bumped on
+  `registerJob` and decremented on the kernel's
+  `afterAction(complete | reject)` callback or — for the non-hookable
+  `claimRefund` path — via the new permissionless `markExpired(jobId)`
+  entry; `setCommerce` now requires `inflightJobCount() == 0` so a
+  kernel switch cannot orphan in-flight escrow (audit L03). Documented
+  trade-offs: only plain ERC-20 tokens are supported (audit I01); the
+  `deliverable` is event-only and not persisted to the `Job` struct
+  (audit I05 / second half) — both tracked in `docs/design.md` §7
+  Open Items. Governance language tightened to make the
+  multisig + Timelock requirement normative `MUST` rather than
+  advisory `SHOULD` (audit I08), and `createJob`'s `_afterHook`-only
+  posture is now explicitly defended in Delta 1.3 (audit I09). No
+  spec-version bump.
+- **2026-04-28** (PR-1 + PR-2) — Audit fixes (BNBChain APEX Contracts
+  Upgrade Audit) P0 + P1 landed. Spec-compatible kernel tightenings:
+  `MAX_EXPIRY_DURATION = 365 days` upper-bounds `expiredAt`
+  (`ExpiryTooLong`, audit L01); `submit` now mirrors `fund`'s
+  `block.timestamp >= expiredAt` guard (audit L02); `createJob`
+  rejects `hook == address(0)` with `HookRequired`, so every job has
+  a real ERC-165 hook (audit L05). The spec still permits the zero
+  hook (kernel skips the call), but rejecting at creation closes a
   silent-bypass class. **`JobFunded` regains an `indexed provider`
   topic** (audit I03), reverting the 2026-04-22 alignment with the
   normative 3-parameter shape; the topic0 change is documented as

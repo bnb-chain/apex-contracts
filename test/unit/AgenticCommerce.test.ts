@@ -433,13 +433,17 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(await token.read.balanceOf([treasury]), 0n);
     });
 
-    it("complete with feeBP = 10000 sends full budget to treasury", async () => {
+    it("complete with feeBP = MAX_PLATFORM_FEE_BP routes 10% to treasury", async () => {
+      // Audit I07: setPlatformFee is capped at MAX_PLATFORM_FEE_BP (1_000)
+      // so this test exercises the maximum fee the kernel will accept.
       const { token, commerce } = await fundAndSubmit();
-      await commerce.write.setPlatformFee([10_000n, treasury]);
+      await commerce.write.setPlatformFee([1_000n, treasury]);
       const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
       await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
-      assert.equal(await token.read.balanceOf([provider]), 0n);
-      assert.equal(await token.read.balanceOf([treasury]), DEFAULT_BUDGET);
+      const fee = (DEFAULT_BUDGET * 1_000n) / 10_000n;
+      const net = DEFAULT_BUDGET - fee;
+      assert.equal(await token.read.balanceOf([provider]), net);
+      assert.equal(await token.read.balanceOf([treasury]), fee);
     });
 
     it("evaluator rejects a Funded job (no submit) → client refunded", async () => {
@@ -631,9 +635,13 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(await commerce.read.platformFeeBP(), 100n);
     });
 
-    it("setPlatformFee rejects fee > 10000", async () => {
+    it("setPlatformFee rejects fee > MAX_PLATFORM_FEE_BP", async () => {
+      // Audit I07: ceiling moved from BP_DENOMINATOR (10_000 = 100%) to
+      // MAX_PLATFORM_FEE_BP (1_000 = 10%). Anything above that reverts.
       const { commerce } = await setup();
-      await assert.rejects(commerce.write.setPlatformFee([10_001n, treasury]), /FeeTooHigh/);
+      await assert.rejects(commerce.write.setPlatformFee([1_001n, treasury]), /FeeTooHigh/);
+      await commerce.write.setPlatformFee([1_000n, treasury]);
+      assert.equal(await commerce.read.platformFeeBP(), 1_000n);
     });
   });
 
@@ -767,6 +775,16 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(getAddress(ev.client), client);
       assert.equal(getAddress(ev.provider), provider);
       assert.equal(ev.amount, DEFAULT_BUDGET);
+    });
+
+    // [I07] platformFeeBP is now capped at 10% in-contract, so even a
+    //       compromised owner cannot route more than that to the treasury.
+    it("[I07] setPlatformFee caps feeBP at MAX_PLATFORM_FEE_BP (1_000)", async () => {
+      const { commerce } = await setup();
+      assert.equal(await commerce.read.MAX_PLATFORM_FEE_BP(), 1_000n);
+      await assert.rejects(commerce.write.setPlatformFee([1_001n, treasury]), /FeeTooHigh/);
+      await commerce.write.setPlatformFee([1_000n, treasury]);
+      assert.equal(await commerce.read.platformFeeBP(), 1_000n);
     });
   });
 });

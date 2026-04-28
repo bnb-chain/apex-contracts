@@ -36,6 +36,13 @@ contract AgenticCommerceUpgradeable is
     /// @notice Basis-point denominator. `feeBP = 10_000` = 100%.
     uint256 public constant BP_DENOMINATOR = 10_000;
 
+    /// @notice Hard ceiling on the platform fee, in basis points (10%).
+    ///         Caps owner discretion: even a compromised owner cannot route
+    ///         more than `MAX_PLATFORM_FEE_BP / BP_DENOMINATOR` of any future
+    ///         settlement to the treasury (audit I07). Tightening only —
+    ///         increasing this constant requires a UUPS upgrade.
+    uint256 public constant MAX_PLATFORM_FEE_BP = 1_000;
+
     /// @notice Maximum lifetime of a job from creation to {claimRefund}
     ///         eligibility. Prevents `expiredAt` from being set so far in the
     ///         future that the kernel's permissionless refund path is
@@ -170,11 +177,15 @@ contract AgenticCommerceUpgradeable is
     // ---------------------------------------------------------------
 
     /// @notice Update the platform fee and treasury address.
-    /// @param  feeBP_     New fee in basis points. Maximum 10_000 (100%).
+    /// @param  feeBP_     New fee in basis points. MUST be <=
+    ///                    {MAX_PLATFORM_FEE_BP} (10%). Capped at the kernel
+    ///                    layer (audit I07); per-deployment governance is
+    ///                    expected to wrap `owner` behind a TimelockController
+    ///                    so even a fee change inside the cap has a delay.
     /// @param  treasury_  New fee recipient.
     function setPlatformFee(uint256 feeBP_, address treasury_) external onlyOwner {
         if (treasury_ == address(0)) revert ZeroAddress();
-        if (feeBP_ > BP_DENOMINATOR) revert FeeTooHigh();
+        if (feeBP_ > MAX_PLATFORM_FEE_BP) revert FeeTooHigh();
         platformFeeBP = feeBP_;
         platformTreasury = treasury_;
         emit PlatformFeeUpdated(feeBP_, treasury_);
