@@ -36,14 +36,52 @@ contract AgenticCommerceUpgradeable is
     /// @notice Basis-point denominator. `feeBP = 10_000` = 100%.
     uint256 public constant BP_DENOMINATOR = 10_000;
 
+    /// @notice Hard ceiling on the platform fee, in basis points (10%).
+    ///         Caps owner discretion: even a compromised owner cannot route
+    ///         more than `MAX_PLATFORM_FEE_BP / BP_DENOMINATOR` of any future
+    ///         settlement to the treasury (audit I07). Tightening only —
+    ///         increasing this constant requires a UUPS upgrade.
+    uint256 public constant MAX_PLATFORM_FEE_BP = 1_000;
+
+    /// @notice Maximum lifetime of a job from creation to {claimRefund}
+    ///         eligibility. Prevents `expiredAt` from being set so far in the
+    ///         future that the kernel's permissionless refund path is
+    ///         effectively unreachable, locking escrow forever (audit L01).
+    uint256 public constant MAX_EXPIRY_DURATION = 365 days;
 
     // ---------------------------------------------------------------
     // Storage (flat upgradeable layout; append-only)
     // ---------------------------------------------------------------
 
-    /// @notice ERC-20 escrow / settlement token. Set once in {initialize}.
+    /// @notice ERC-20 escrow / settlement token. Set once in {initialize}
+    ///         and immutable thereafter.
     /// @dev    Stored as `address` so the auto-generated public getter
     ///         matches `IACP.paymentToken()` exactly.
+    ///
+    ///         **TOKEN CONTRACT REQUIREMENTS — deployer responsibility
+    ///         (audit I01):** `paymentToken` MUST be a standard ERC-20
+    ///         whose `transfer` / `transferFrom` deliver exactly the
+    ///         requested amount and whose held balance does not
+    ///         spontaneously change between calls.
+    ///
+    ///         The kernel does NOT reconcile pre/post `balanceOf` in
+    ///         {fund}; `job.budget` is taken at face value. Deploying
+    ///         against any of the following will cause silent escrow
+    ///         drift and revert at settlement (clients still recover
+    ///         escrow via {claimRefund} after `expiredAt`, but providers
+    ///         and treasury cannot collect):
+    ///
+    ///           * fee-on-transfer (a.k.a. reflection / deflationary)
+    ///             tokens;
+    ///           * rebasing / elastic-supply tokens;
+    ///           * tokens with blocklists or fee toggles that mid-
+    ///             lifecycle change `transfer` semantics;
+    ///           * any token whose `balanceOf(address)` can decrease
+    ///             without an outgoing `transfer` from `address`.
+    ///
+    ///         Vetted choices on BNB Chain include USDT, USDC, and
+    ///         other audited stablecoins. Confirm against the token's
+    ///         source before {initialize}.
     address public paymentToken;
 
     /// @notice Platform fee in basis points (0..10_000).
@@ -81,7 +119,15 @@ contract AgenticCommerceUpgradeable is
     );
     event ProviderSet(uint256 indexed jobId, address indexed provider);
     event BudgetSet(uint256 indexed jobId, uint256 amount);
-    event JobFunded(uint256 indexed jobId, address indexed client, uint256 amount);
+    /// @notice Emitted on successful escrow.
+    /// @dev    `provider` is `indexed` so providers can `eth_getLogs` for jobs
+    ///         assigned to them without joining against {JobCreated} (audit I03).
+    ///         The Router-mediated client flow always sets `provider` before
+    ///         `fund`, so it is observably the locked-in counterparty at this
+    ///         moment. This adds one topic to the spec-canonical
+    ///         `JobFunded(jobId, client, amount)` shape; see
+    ///         `docs/erc-8183-compliance.md` for the disclosed deviation.
+    event JobFunded(uint256 indexed jobId, address indexed client, address indexed provider, uint256 amount);
     event JobSubmitted(uint256 indexed jobId, address indexed provider, bytes32 deliverable);
     event JobCompleted(uint256 indexed jobId, address indexed evaluator, bytes32 reason);
     event JobRejected(uint256 indexed jobId, address indexed rejector, bytes32 reason);
@@ -98,13 +144,28 @@ contract AgenticCommerceUpgradeable is
     error InvalidJob();
     error WrongStatus();
     error Unauthorized();
+    /// @notice Thrown by {setProvider} when the job already has a provider
+    ///         bound to it. Distinguishes the "provider already set" branch
+    ///         from generic status mismatches so off-chain clients can
+    ///         surface a precise error to users (audit I05).
+    error ProviderAlreadySet();
     error ExpiryTooShort();
+    /// @notice Thrown by {createJob} when `expiredAt` is further in the future
+    ///         than {MAX_EXPIRY_DURATION} (audit L01).
+    error ExpiryTooLong();
     error ZeroBudget();
     error BudgetMismatch();
     error ProviderNotSet();
     error FeeTooHigh();
     error HookMissingInterface();
     error HookCallFailed();
+    /// @notice Thrown by {createJob} when `hook == address(0)`. Every job MUST
+    ///         have a hook contract — the zero address bypasses
+    ///         `_beforeHook` / `_afterHook` and would silently disable any
+    ///         hook-enforced policy gating (audit L05). The runtime
+    ///         `hook == 0` skip in `_beforeHook` / `_afterHook` is retained
+    ///         as defence-in-depth even though no new job can reach it.
+    error HookRequired();
 
     // ---------------------------------------------------------------
     // Initialisation
@@ -116,9 +177,15 @@ contract AgenticCommerceUpgradeable is
     }
 
     /// @notice One-time initialiser run through the proxy.
-    /// @param paymentToken_ ERC-20 escrow token (immutable after this call).
+    /// @param paymentToken_ ERC-20 escrow token. Immutable after this
+    ///                      call. **MUST** be a standard ERC-20 — see
+    ///                      the token-class requirements on {paymentToken}
+    ///                      (audit I01). Misconfiguration is a deployer
+    ///                      bug, not a kernel one.
     /// @param treasury_     Platform fee recipient.
-    /// @param owner_        Initial owner (RECOMMENDED multisig).
+    /// @param owner_        Initial owner. Production deployments MUST
+    ///                      use a multisig fronted by a TimelockController
+    ///                      (audit I08; see `docs/design.md` §6 R1).
     function initialize(address paymentToken_, address treasury_, address owner_) external initializer {
         if (paymentToken_ == address(0) || treasury_ == address(0) || owner_ == address(0)) {
             revert ZeroAddress();
@@ -142,11 +209,15 @@ contract AgenticCommerceUpgradeable is
     // ---------------------------------------------------------------
 
     /// @notice Update the platform fee and treasury address.
-    /// @param  feeBP_     New fee in basis points. Maximum 10_000 (100%).
+    /// @param  feeBP_     New fee in basis points. MUST be <=
+    ///                    {MAX_PLATFORM_FEE_BP} (10%). Capped at the kernel
+    ///                    layer (audit I07); per-deployment governance is
+    ///                    expected to wrap `owner` behind a TimelockController
+    ///                    so even a fee change inside the cap has a delay.
     /// @param  treasury_  New fee recipient.
     function setPlatformFee(uint256 feeBP_, address treasury_) external onlyOwner {
         if (treasury_ == address(0)) revert ZeroAddress();
-        if (feeBP_ > BP_DENOMINATOR) revert FeeTooHigh();
+        if (feeBP_ > MAX_PLATFORM_FEE_BP) revert FeeTooHigh();
         platformFeeBP = feeBP_;
         platformTreasury = treasury_;
         emit PlatformFeeUpdated(feeBP_, treasury_);
@@ -210,9 +281,13 @@ contract AgenticCommerceUpgradeable is
     ///                      via {setProvider}).
     /// @param  evaluator    Evaluator address. MUST NOT be zero.
     /// @param  expiredAt    Unix timestamp at which the job becomes refundable.
+    ///                      MUST be at least 5 minutes in the future and at
+    ///                      most {MAX_EXPIRY_DURATION} away (audit L01).
     /// @param  description  Human-readable description.
-    /// @param  hook         Optional hook address. If non-zero MUST implement
-    ///                      {IACPHook} per ERC-165.
+    /// @param  hook         Hook contract address. MUST be non-zero and MUST
+    ///                      implement {IACPHook} per ERC-165 (audit L05).
+    ///                      Use a no-op `IACPHook` when an evaluator does not
+    ///                      need pre/post-action callbacks.
     function createJob(
         address provider,
         address evaluator,
@@ -222,10 +297,10 @@ contract AgenticCommerceUpgradeable is
     ) external nonReentrant whenNotPaused returns (uint256 jobId) {
         if (evaluator == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
-        if (hook != address(0)) {
-            if (!ERC165Checker.supportsInterface(hook, type(IACPHook).interfaceId)) {
-                revert HookMissingInterface();
-            }
+        if (expiredAt > block.timestamp + MAX_EXPIRY_DURATION) revert ExpiryTooLong();
+        if (hook == address(0)) revert HookRequired();
+        if (!ERC165Checker.supportsInterface(hook, type(IACPHook).interfaceId)) {
+            revert HookMissingInterface();
         }
 
         unchecked {
@@ -241,7 +316,8 @@ contract AgenticCommerceUpgradeable is
             expiredAt: expiredAt,
             status: JobStatus.Open,
             hook: hook,
-            submittedAt: 0
+            submittedAt: 0,
+            deliverable: bytes32(0)
         });
         emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt, hook);
 
@@ -259,7 +335,7 @@ contract AgenticCommerceUpgradeable is
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
-        if (job.provider != address(0)) revert WrongStatus();
+        if (job.provider != address(0)) revert ProviderAlreadySet();
         if (provider_ == address(0)) revert ZeroAddress();
 
         bytes memory hookData = abi.encode(provider_, optParams);
@@ -273,6 +349,11 @@ contract AgenticCommerceUpgradeable is
     /// @notice Set the budget for a job. Per ERC-8183, either `client` or
     ///         `provider` MAY call this. Front-running on {fund} is prevented
     ///         by the `expectedBudget` parameter.
+    /// @dev    `amount == 0` is rejected up front (audit I02). The kernel
+    ///         treats `budget > 0` as an invariant of the `Funded` state, and
+    ///         {fund} would otherwise need to encode that invariant a second
+    ///         time. Rejecting at the source also lets us simplify {fund}
+    ///         to a single `jobHasBudget` check.
     function setBudget(uint256 jobId, uint256 amount, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
@@ -280,6 +361,7 @@ contract AgenticCommerceUpgradeable is
         if (msg.sender != job.client && msg.sender != job.provider) {
             revert Unauthorized();
         }
+        if (amount == 0) revert ZeroBudget();
 
         bytes memory hookData = abi.encode(amount, optParams);
         _beforeHook(job.hook, jobId, this.setBudget.selector, hookData);
@@ -292,13 +374,17 @@ contract AgenticCommerceUpgradeable is
 
     /// @notice Client deposits escrow equal to `expectedBudget`. Reverts if
     ///         `job.budget != expectedBudget` (front-running guard).
+    /// @dev    Performs a single `safeTransferFrom(client, this, budget)`
+    ///         and trusts the post-transfer balance to equal `budget`.
+    ///         See {paymentToken} for the token-class requirements that
+    ///         make this assumption sound (audit I01).
     function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Open) revert WrongStatus();
         if (msg.sender != job.client) revert Unauthorized();
         if (job.provider == address(0)) revert ProviderNotSet();
-        if (!jobHasBudget[jobId] || job.budget == 0) revert ZeroBudget();
+        if (!jobHasBudget[jobId]) revert ZeroBudget();
         if (job.budget != expectedBudget) revert BudgetMismatch();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
 
@@ -307,21 +393,32 @@ contract AgenticCommerceUpgradeable is
         IERC20(paymentToken).safeTransferFrom(job.client, address(this), job.budget);
         _afterHook(job.hook, jobId, this.fund.selector, optParams);
 
-        emit JobFunded(jobId, job.client, job.budget);
+        emit JobFunded(jobId, job.client, job.provider, job.budget);
     }
 
     /// @notice Provider submits the deliverable hash, moving the job to the
     ///         `Submitted` state.
+    /// @dev    Reverts with `WrongStatus` if `block.timestamp >= expiredAt`,
+    ///         mirroring the existing guard in {fund}. Submitting after
+    ///         expiry would let the client (or any observer) front-run the
+    ///         provider via {claimRefund} and walk away with both the
+    ///         deliverable and the escrow (audit L02).
     function submit(uint256 jobId, bytes32 deliverable, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
         if (job.status != JobStatus.Funded) revert WrongStatus();
         if (msg.sender != job.provider) revert Unauthorized();
+        if (block.timestamp >= job.expiredAt) revert WrongStatus();
 
         bytes memory hookData = abi.encode(deliverable, optParams);
         _beforeHook(job.hook, jobId, this.submit.selector, hookData);
         job.status = JobStatus.Submitted;
         job.submittedAt = block.timestamp;
+        // Persist `deliverable` to job storage (audit I05) so on-chain
+        // consumers (future verifying policies, arbitration contracts,
+        // reputation registries) can read the deliverable directly via
+        // {getJob}, without reconstructing it from the JobSubmitted event.
+        job.deliverable = deliverable;
         _afterHook(job.hook, jobId, this.submit.selector, hookData);
 
         emit JobSubmitted(jobId, job.provider, deliverable);

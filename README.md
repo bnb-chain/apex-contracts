@@ -61,8 +61,8 @@ addresses and the treasury are operational details — look them up in
 | Contract                        | Address                                                                                                                        |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `AgenticCommerceUpgradeable`    | [`0xa206c0517B6371C6638CD9e4a42Cc9f02A33B0DE`](https://testnet.bscscan.com/address/0xa206c0517B6371C6638CD9e4a42Cc9f02A33B0DE) |
-| `EvaluatorRouterUpgradeable`    | [`0xD7d36D66d2F1B608A0F943f722D27e3744f66F25`](https://testnet.bscscan.com/address/0xD7d36D66d2F1B608A0F943f722D27e3744f66F25) |
-| `OptimisticPolicy`              | [`0x1fb48755361a34bbe728ccc55582116eec344214`](https://testnet.bscscan.com/address/0x1fb48755361a34bbe728ccc55582116eec344214) |
+| `EvaluatorRouterUpgradeable`    | [`0xd7d36d66d2f1b608a0f943f722d27e3744f66f25`](https://testnet.bscscan.com/address/0xd7d36d66d2f1b608a0f943f722d27e3744f66f25) |
+| `OptimisticPolicy`              | [`0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6`](https://testnet.bscscan.com/address/0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6) |
 | Payment token (USDC on testnet) | [`0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565`](https://testnet.bscscan.com/address/0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565) |
 
 Testnet `OptimisticPolicy` runs with a short dispute window for faster
@@ -124,6 +124,36 @@ bun run e2e:testnet
 Testnet requires 3 pre-funded wallets (owner, client, provider) configured via
 `.env`. See [`test/e2e/README.md`](./test/e2e/README.md) for the full
 balance + key matrix.
+
+### Pre-deploy checklist
+
+Before running `deploy:*`, verify each of the following — these are
+**deployer responsibilities** and the contracts assume them silently
+(audit I01 / I08):
+
+1. **`paymentToken` is a standard ERC-20.** The kernel does not
+   reconcile pre/post `balanceOf` in `fund`; it trusts that
+   `safeTransferFrom(client, this, budget)` deposits exactly `budget`
+   into the proxy and that the held balance does not drift between
+   calls. The following classes will cause silent escrow accounting
+   drift and revert at settlement:
+   - fee-on-transfer / reflection / deflationary tokens,
+   - rebasing / elastic-supply tokens,
+   - tokens with mid-lifecycle blocklists or fee toggles,
+   - any token whose `balanceOf(address)` can decrease without an
+     outgoing transfer from `address`.
+
+   Audited stablecoins on BNB Chain (USDT, USDC) are safe choices.
+   Confirm against the token's source before calling `initialize`.
+
+2. **Owner is a multisig fronted by a `TimelockController`.** Required
+   delays: 48h for `AgenticCommerce`, 24h for `EvaluatorRouter`. Single-
+   key ownership is a production mis-configuration; see
+   [`docs/design.md`](./docs/design.md) §6 R1.
+3. **Voter set on `OptimisticPolicy` has `≥ 3 × voteQuorum` members**
+   under independent operational control, with 24/7 monitoring. The
+   policy is non-upgradeable; rotating voters means deploying a fresh
+   policy and re-whitelisting it on the Router.
 
 ### Deploy to BSC Testnet / Mainnet
 

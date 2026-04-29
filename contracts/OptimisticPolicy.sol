@@ -10,13 +10,29 @@ import {IPolicy} from "./IPolicy.sol";
 ///
 /// @dev    Lifecycle per job:
 ///         1. Router calls `onSubmitted(jobId, deliverable)` once, right after
-///            the kernel's `submit`. `submittedAt` is recorded.
-///         2. Client MAY call `dispute(jobId)` within `disputeWindow`.
-///         3. Whitelisted voters MAY call `voteReject(jobId)` once each.
+///            the kernel's `submit`. `submittedAt` is recorded. Reverts with
+///            `SubmissionTooLate` if `block.timestamp + disputeWindow` would
+///            exceed `job.expiredAt` — i.e. the dispute window cannot close
+///            before `claimRefund` becomes callable. Without this guard a
+///            client could dispute and then race the provider to
+///            `claimRefund` regardless of voter behaviour.
+///         2. Client MAY call `dispute(jobId)` within `disputeWindow`. The
+///            current `voteQuorum` is snapshotted so subsequent admin
+///            updates do not move the goalposts on an in-flight dispute.
+///         3. Whitelisted voters MAY call `voteReject(jobId)` once each,
+///            within the same `disputeWindow` that gates `dispute`. Votes
+///            cast at or after `submittedAt + disputeWindow` revert with
+///            `OutsideDisputeWindow`. Voting on a job whose kernel status
+///            is no longer `Submitted` reverts with `WrongJobStatus`.
 ///         4. `check(jobId, _)` returns:
-///              - APPROVE  if not disputed AND `submittedAt + disputeWindow`
-///                has elapsed.
-///              - REJECT   if disputed AND `rejectVotes >= voteQuorum`.
+///              - APPROVE  if `submittedAt + disputeWindow` has elapsed AND
+///                the disputed branch has not reached its quorum snapshot.
+///                Disputes that fail to muster quorum within the window
+///                fall through to the default-approve path — silence by
+///                voters is treated identically whether the job was
+///                disputed or not.
+///              - REJECT   if disputed AND `rejectVotes >=` quorum
+///                snapshot.
 ///              - PENDING  otherwise.
 ///
 ///         Verdicts: 0 = Pending, 1 = Approve, 2 = Reject.
@@ -83,6 +99,15 @@ contract OptimisticPolicy is IPolicy {
     mapping(uint256 jobId => uint16) public rejectVotes;
     mapping(uint256 jobId => mapping(address voter => bool)) public hasVoted;
 
+    /// @notice Quorum threshold snapshotted at the time `dispute()` was
+    ///         called. `check()` and `voteReject()` use this value instead of
+    ///         the live `voteQuorum`, so admin updates to the quorum after a
+    ///         dispute is open cannot retroactively change the rejection
+    ///         threshold for that dispute.
+    /// @dev    Zero means "no snapshot recorded" — matches the default storage
+    ///         value for jobs that were never disputed.
+    mapping(uint256 jobId => uint16) public disputeQuorumSnapshot;
+
     // ---------------------------------------------------------------
     // Events
     // ---------------------------------------------------------------
@@ -90,8 +115,11 @@ contract OptimisticPolicy is IPolicy {
     event JobInitialised(uint256 indexed jobId, bytes32 deliverable, uint64 submittedAt, bytes optParams);
     event Disputed(uint256 indexed jobId, address indexed client);
     event VoteCast(uint256 indexed jobId, address indexed voter, uint16 rejectVotes);
-    /// @notice Emitted on the vote that first meets or exceeds `voteQuorum`.
-    ///         Off-chain subscribers can use this as a zero-latency "ready to settle" signal.
+    /// @notice Emitted exactly on the vote that first meets or exceeds the
+    ///         {disputeQuorumSnapshot} for `jobId` — the quorum threshold
+    ///         that was in force when {dispute} was called. Off-chain
+    ///         subscribers can use this as a zero-latency "ready to settle"
+    ///         signal without re-emission noise from later same-job votes.
     event QuorumReached(uint256 indexed jobId, uint16 rejectVotes);
     event VoterAdded(address indexed voter, uint16 activeVoterCount);
     event VoterRemoved(address indexed voter, uint16 activeVoterCount);
@@ -121,6 +149,11 @@ contract OptimisticPolicy is IPolicy {
     error VoterAlreadyExists();
     error UnknownVoter();
     error WouldBreakQuorum();
+    /// @notice Thrown by {onSubmitted} when the dispute window cannot fully
+    ///         fit before the kernel job's `expiredAt`. Forces providers to
+    ///         submit early enough that voters get a fair shot at responding
+    ///         before `claimRefund` becomes callable.
+    error SubmissionTooLate();
 
     // ---------------------------------------------------------------
     // Modifiers
@@ -172,12 +205,24 @@ contract OptimisticPolicy is IPolicy {
     /// @dev `optParams` is emitted in {JobInitialised} so off-chain voters can
     ///      locate and verify the deliverable manifest (e.g. parse JSON for
     ///      `deliverable_url`). It is not persisted to storage.
-    function onSubmitted(
-        uint256 jobId,
-        bytes32 deliverable,
-        bytes calldata optParams
-    ) external override onlyRouter {
+    ///
+    ///      Reverts with {SubmissionTooLate} when
+    ///      `block.timestamp + disputeWindow > job.expiredAt`. This bubbles
+    ///      back through the kernel's `submit` and prevents the late-
+    ///      submission griefing path described in the audit's L07: without
+    ///      this guard a provider could submit just before expiry and the
+    ///      client could dispute, leaving voters no time to vote and the
+    ///      client free to call {AgenticCommerceUpgradeable.claimRefund}
+    ///      the moment expiry hit.
+    function onSubmitted(uint256 jobId, bytes32 deliverable, bytes calldata optParams) external override onlyRouter {
         if (submittedAt[jobId] != 0) revert AlreadyInitialised();
+        IACP.Job memory job = commerce.getJob(jobId);
+        // `block.timestamp + disputeWindow` cannot overflow uint256 in any
+        // realistic deployment, but the explicit cast keeps the comparison
+        // sound across operand widths.
+        if (block.timestamp + uint256(disputeWindow) > job.expiredAt) {
+            revert SubmissionTooLate();
+        }
         uint64 ts = uint64(block.timestamp);
         submittedAt[jobId] = ts;
         emit JobInitialised(jobId, deliverable, ts, optParams);
@@ -188,6 +233,13 @@ contract OptimisticPolicy is IPolicy {
     ///      At exactly `submittedAt + disputeWindow` this function flips to
     ///      APPROVE while {dispute} starts reverting `OutsideDisputeWindow` —
     ///      the boundary moment is treated as "already approved".
+    ///
+    ///      Disputed jobs that fail to muster their snapshot quorum within
+    ///      the window fall through to the same time-based default-approve
+    ///      branch as undisputed jobs. This closes the audit's H01 path:
+    ///      without the fall-through, a zero-cost {dispute} call could pin
+    ///      `check()` at PENDING forever, blocking the provider's payout
+    ///      and letting the client recover the escrow via expiry.
     function check(
         uint256 jobId,
         bytes calldata /* evidence */
@@ -197,11 +249,8 @@ contract OptimisticPolicy is IPolicy {
             return (VERDICT_PENDING, bytes32(0));
         }
 
-        if (disputed[jobId]) {
-            if (rejectVotes[jobId] >= voteQuorum) {
-                return (VERDICT_REJECT, REASON_REJECTED);
-            }
-            return (VERDICT_PENDING, bytes32(0));
+        if (disputed[jobId] && rejectVotes[jobId] >= disputeQuorumSnapshot[jobId]) {
+            return (VERDICT_REJECT, REASON_REJECTED);
         }
 
         if (block.timestamp >= uint256(ts) + uint256(disputeWindow)) {
@@ -216,13 +265,19 @@ contract OptimisticPolicy is IPolicy {
 
     /// @notice Client raises a dispute. MUST be called within `disputeWindow`
     ///         after submission. Flips the job into the "requires quorum"
-    ///         path and keeps it PENDING until votes accrue.
+    ///         path; verdict resolution is then a race between voters
+    ///         reaching quorum (REJECT) and the dispute window elapsing
+    ///         (APPROVE — see {check}).
     /// @dev    Window is a half-open interval `[submittedAt, submittedAt +
     ///         disputeWindow)`: at exactly `submittedAt + disputeWindow` this
     ///         call reverts and {check} already returns APPROVE. Also reverts
     ///         once the kernel job has left the `Submitted` state — disputing
     ///         a Completed / Rejected job is a no-op that wastes gas, so it
     ///         is rejected up front.
+    ///
+    ///         The current `voteQuorum` is snapshotted into
+    ///         {disputeQuorumSnapshot} so subsequent admin updates do not
+    ///         change the rejection threshold for this dispute (audit L08).
     function dispute(uint256 jobId) external {
         IACP.Job memory job = commerce.getJob(jobId);
         if (msg.sender != job.client) revert NotClient();
@@ -239,15 +294,41 @@ contract OptimisticPolicy is IPolicy {
         }
 
         disputed[jobId] = true;
+        disputeQuorumSnapshot[jobId] = voteQuorum;
         emit Disputed(jobId, msg.sender);
     }
 
     /// @notice Cast a reject vote for a disputed job. Each voter may vote
     ///         at most once per job.
+    /// @dev    Reverts with `WrongJobStatus` if the kernel job has already
+    ///         left the `Submitted` state. Voting on a Completed / Rejected
+    ///         / Expired job has no effect on settlement (the kernel would
+    ///         reject any subsequent {settle}) and only wastes voter gas
+    ///         and pollutes the on-chain log (audit I04).
+    ///
+    ///         Reverts with `OutsideDisputeWindow` once
+    ///         `block.timestamp >= submittedAt + disputeWindow`. The voting
+    ///         window mirrors the dispute window: `[submittedAt, submittedAt
+    ///         + disputeWindow)`. Without this guard a voter could keep
+    ///         accumulating votes after the window closed and front-run a
+    ///         provider's pending {EvaluatorRouterUpgradeable.settle} to
+    ///         flip a default-approve verdict into a REJECT, defeating
+    ///         the §4.4 design statement that "a dispute is only effective
+    ///         when voters back it up within the window".
+    ///
+    ///         {QuorumReached} is emitted exactly on the vote that first
+    ///         crosses the snapshot threshold, matching the event's NatDoc.
     function voteReject(uint256 jobId) external {
         if (!isVoter[msg.sender]) revert NotVoter();
         if (!disputed[jobId]) revert NotDisputed();
         if (hasVoted[jobId][msg.sender]) revert AlreadyVoted();
+        if (commerce.getJob(jobId).status != IACP.JobStatus.Submitted) {
+            revert WrongJobStatus();
+        }
+        uint64 ts = submittedAt[jobId];
+        if (block.timestamp >= uint256(ts) + uint256(disputeWindow)) {
+            revert OutsideDisputeWindow();
+        }
 
         hasVoted[jobId][msg.sender] = true;
         // `rejectVotes[jobId]` is uint16 (max 65535). `unchecked` is safe
@@ -256,13 +337,17 @@ contract OptimisticPolicy is IPolicy {
         // (also uint16). Reaching overflow would require >65k voters — well
         // beyond any realistic whitelist size. If the deployment topology
         // ever grows there, widen both counters to uint32 in the next impl.
+        uint16 prevCount = rejectVotes[jobId];
         uint16 newCount;
         unchecked {
-            newCount = rejectVotes[jobId] + 1;
+            newCount = prevCount + 1;
         }
         rejectVotes[jobId] = newCount;
         emit VoteCast(jobId, msg.sender, newCount);
-        if (newCount >= voteQuorum) emit QuorumReached(jobId, newCount);
+        uint16 snapshot = disputeQuorumSnapshot[jobId];
+        if (newCount >= snapshot && prevCount < snapshot) {
+            emit QuorumReached(jobId, newCount);
+        }
     }
 
     // ---------------------------------------------------------------

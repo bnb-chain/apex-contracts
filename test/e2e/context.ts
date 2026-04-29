@@ -155,7 +155,8 @@ async function buildLocalContext(
       }),
     asPolicy: (wallet) =>
       viem.getContractAt("OptimisticPolicy", policy.address, { client: { wallet } }),
-    asToken: (wallet) => viem.getContractAt("ERC20MinimalMock", token.address, { client: { wallet } }),
+    asToken: (wallet) =>
+      viem.getContractAt("ERC20MinimalMock", token.address, { client: { wallet } }),
   };
   return ctx;
 }
@@ -270,7 +271,8 @@ async function buildTestnetContext(
       }),
     asPolicy: (wallet) =>
       viem.getContractAt("OptimisticPolicy", policy.address, { client: { wallet } }),
-    asToken: (wallet) => viem.getContractAt("ERC20MinimalMock", paymentToken, { client: { wallet } }),
+    asToken: (wallet) =>
+      viem.getContractAt("ERC20MinimalMock", paymentToken, { client: { wallet } }),
   };
   return ctx;
 }

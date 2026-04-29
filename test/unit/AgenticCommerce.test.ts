@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { getAddress, keccak256, toBytes, zeroAddress } from "viem";
+import { getAddress, keccak256, parseEventLogs, toBytes, zeroAddress } from "viem";
 
 import {
   JobStatus,
@@ -9,6 +9,7 @@ import {
   ZERO_BYTES32,
   deployCommerce,
   deployMockToken,
+  deployNoopHook,
   blockTimestamp,
   advanceSeconds,
 } from "./helpers.js";
@@ -25,6 +26,12 @@ describe("AgenticCommerceUpgradeable", async () => {
   const evaluator = getAddress(evaluatorW.account.address);
   const treasury = getAddress(treasuryW.account.address);
   const other = getAddress(otherW.account.address);
+
+  // Shared no-op IACPHook used as a benign placeholder for tests that don't
+  // exercise hook semantics. Required after audit L05: createJob now rejects
+  // hook == address(0) with `HookRequired`.
+  const noopHook = await deployNoopHook(viem);
+  const noopHookAddr = noopHook.address as `0x${string}`;
 
   async function setup() {
     const token = await deployMockToken(viem);
@@ -109,7 +116,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         expiredAt,
         "Job #1",
-        zeroAddress,
+        noopHookAddr,
       ]);
 
       const job = await commerce.read.getJob([1n]);
@@ -197,7 +204,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setProvider([1n, provider, "0x"]);
       const job = await commerce.read.getJob([1n]);
@@ -212,7 +219,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       const commerceAsOther = await asCommerce(commerce.address, otherW);
       await assert.rejects(commerceAsOther.write.setProvider([1n, provider, "0x"]), /Unauthorized/);
@@ -226,9 +233,15 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
-      await assert.rejects(commerceAsClient.write.setProvider([1n, other, "0x"]), /WrongStatus/);
+      // Audit I05: this branch now revert with ProviderAlreadySet, not the
+      // generic WrongStatus, so off-chain clients can distinguish it from
+      // an actual status mismatch.
+      await assert.rejects(
+        commerceAsClient.write.setProvider([1n, other, "0x"]),
+        /ProviderAlreadySet/,
+      );
     });
   });
 
@@ -245,7 +258,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
 
       // Client sets.
@@ -269,7 +282,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       const commerceAsOther = await asCommerce(commerce.address, otherW);
       await assert.rejects(
@@ -292,7 +305,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -327,7 +340,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await assert.rejects(commerceAsClient.write.fund([1n, 0n, "0x"]), /ZeroBudget/);
     });
@@ -340,7 +353,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await assert.rejects(
@@ -353,7 +366,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       const { token, commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
       const expiredAt = await futureTs(3600);
-      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", zeroAddress]);
+      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", noopHookAddr]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
       const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
@@ -379,7 +392,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -420,13 +433,17 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(await token.read.balanceOf([treasury]), 0n);
     });
 
-    it("complete with feeBP = 10000 sends full budget to treasury", async () => {
+    it("complete with feeBP = MAX_PLATFORM_FEE_BP routes 10% to treasury", async () => {
+      // Audit I07: setPlatformFee is capped at MAX_PLATFORM_FEE_BP (1_000)
+      // so this test exercises the maximum fee the kernel will accept.
       const { token, commerce } = await fundAndSubmit();
-      await commerce.write.setPlatformFee([10_000n, treasury]);
+      await commerce.write.setPlatformFee([1_000n, treasury]);
       const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
       await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
-      assert.equal(await token.read.balanceOf([provider]), 0n);
-      assert.equal(await token.read.balanceOf([treasury]), DEFAULT_BUDGET);
+      const fee = (DEFAULT_BUDGET * 1_000n) / 10_000n;
+      const net = DEFAULT_BUDGET - fee;
+      assert.equal(await token.read.balanceOf([provider]), net);
+      assert.equal(await token.read.balanceOf([treasury]), fee);
     });
 
     it("evaluator rejects a Funded job (no submit) → client refunded", async () => {
@@ -437,7 +454,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -480,7 +497,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.reject([1n, ZERO_BYTES32, "0x"]);
       const job = await commerce.read.getJob([1n]);
@@ -495,7 +512,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -529,7 +546,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       });
       const commerceAsClient = await asCommerce(commerce.address, clientW);
       const expiredAt = await futureTs(3600);
-      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", zeroAddress]);
+      await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", noopHookAddr]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
 
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -557,7 +574,7 @@ describe("AgenticCommerceUpgradeable", async () => {
         evaluator,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);
@@ -600,7 +617,6 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(await token.read.balanceOf([client]), DEFAULT_BUDGET);
       assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Expired);
     });
-
   });
 
   // ==================================================================
@@ -619,9 +635,191 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(await commerce.read.platformFeeBP(), 100n);
     });
 
-    it("setPlatformFee rejects fee > 10000", async () => {
+    it("setPlatformFee rejects fee > MAX_PLATFORM_FEE_BP", async () => {
+      // Audit I07: ceiling moved from BP_DENOMINATOR (10_000 = 100%) to
+      // MAX_PLATFORM_FEE_BP (1_000 = 10%). Anything above that reverts.
       const { commerce } = await setup();
-      await assert.rejects(commerce.write.setPlatformFee([10_001n, treasury]), /FeeTooHigh/);
+      await assert.rejects(commerce.write.setPlatformFee([1_001n, treasury]), /FeeTooHigh/);
+      await commerce.write.setPlatformFee([1_000n, treasury]);
+      assert.equal(await commerce.read.platformFeeBP(), 1_000n);
+    });
+  });
+
+  // ==================================================================
+  // Audit regressions
+  // ==================================================================
+
+  describe("audit regressions", () => {
+    // [L01] expiredAt must be capped to MAX_EXPIRY_DURATION; without the
+    //       cap, a misconfigured client could lock escrow until uint256
+    //       overflow, leaving no on-chain refund path.
+    it("[L01] createJob rejects expiredAt > now + 365 days with ExpiryTooLong", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      // 1 hour past the cap; well beyond hardhat's per-tx 1s auto-advance.
+      const tooFar = (await blockTimestamp(viem)) + 365n * 86_400n + 3600n;
+      await assert.rejects(
+        commerceAsClient.write.createJob([
+          provider,
+          evaluator,
+          tooFar,
+          "L01 regression",
+          noopHookAddr,
+        ]),
+        /ExpiryTooLong/,
+      );
+    });
+
+    // [L02] submit() must mirror fund()'s expiry guard. Without it, a
+    //       provider submitting after expiredAt can be immediately front-run
+    //       by claimRefund.
+    it("[L02] submit() reverts WrongStatus once block.timestamp >= expiredAt", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      const expiredAt = await futureTs(3600);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        expiredAt,
+        "L02 regression",
+        noopHookAddr,
+      ]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+
+      // Fast-forward past expiredAt so the provider is racing the refund path.
+      await advanceSeconds(viem, 3700);
+
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await assert.rejects(
+        commerceAsProvider.write.submit([1n, keccak256(toBytes("late")), "0x"]),
+        /WrongStatus/,
+      );
+    });
+
+    // [L05] hook == address(0) bypasses _beforeHook / _afterHook entirely,
+    //       which silently disables any policy-side gating. createJob must
+    //       reject this configuration up front.
+    it("[L05] createJob rejects hook == address(0) with HookRequired", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await assert.rejects(
+        commerceAsClient.write.createJob([
+          provider,
+          evaluator,
+          await futureTs(3600),
+          "L05 regression",
+          zeroAddress,
+        ]),
+        /HookRequired/,
+      );
+    });
+
+    // [I02] setBudget(0) used to silently flip jobHasBudget to true and
+    //       leave fund() to fail with a confusing "ZeroBudget" path. The
+    //       kernel now rejects amount == 0 at the source.
+    it("[I02] setBudget rejects amount == 0 with ZeroBudget", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      await assert.rejects(commerceAsClient.write.setBudget([1n, 0n, "0x"]), /ZeroBudget/);
+    });
+
+    // [I03] JobFunded carries an indexed `provider` topic so providers can
+    //       filter funded jobs assigned to them via eth_getLogs alone.
+    it("[I03] JobFunded emits indexed provider topic", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      const txHash = await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      const funded = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "JobFunded",
+      }) as unknown as Array<{
+        args: {
+          jobId: bigint;
+          client: `0x${string}`;
+          provider: `0x${string}`;
+          amount: bigint;
+        };
+      }>;
+      assert.equal(funded.length, 1);
+      const ev = funded[0].args;
+      assert.equal(ev.jobId, 1n);
+      assert.equal(getAddress(ev.client), client);
+      assert.equal(getAddress(ev.provider), provider);
+      assert.equal(ev.amount, DEFAULT_BUDGET);
+    });
+
+    // [I05] submit() must persist the provider's deliverable hash to
+    //       Job.deliverable in addition to the JobSubmitted event so that
+    //       on-chain consumers (verifying policies, arbitration contracts,
+    //       reputation registries) can read it via getJob without rebuilding
+    //       state from logs.
+    it("[I05] submit persists deliverable to Job.deliverable", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "I05 regression",
+        noopHookAddr,
+      ]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+
+      const jobBeforeSubmit = await commerce.read.getJob([1n]);
+      assert.equal(jobBeforeSubmit.deliverable, ZERO_BYTES32);
+
+      const deliverable = keccak256(toBytes("I05 deliverable"));
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.submit([1n, deliverable, "0x"]);
+
+      const jobAfterSubmit = await commerce.read.getJob([1n]);
+      assert.equal(jobAfterSubmit.status, JobStatus.Submitted);
+      assert.equal(jobAfterSubmit.deliverable, deliverable);
+    });
+
+    // [I07] platformFeeBP is now capped at 10% in-contract, so even a
+    //       compromised owner cannot route more than that to the treasury.
+    it("[I07] setPlatformFee caps feeBP at MAX_PLATFORM_FEE_BP (1_000)", async () => {
+      const { commerce } = await setup();
+      assert.equal(await commerce.read.MAX_PLATFORM_FEE_BP(), 1_000n);
+      await assert.rejects(commerce.write.setPlatformFee([1_001n, treasury]), /FeeTooHigh/);
+      await commerce.write.setPlatformFee([1_000n, treasury]);
+      assert.equal(await commerce.read.platformFeeBP(), 1_000n);
     });
   });
 });

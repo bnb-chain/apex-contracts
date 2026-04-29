@@ -29,6 +29,7 @@ interface IACP {
         JobStatus status;
         address hook;
         uint256 submittedAt; // Timestamp when provider submitted; 0 before submission
+        bytes32 deliverable; // Provider's deliverable hash; zero before submission (audit I05)
     }
 
     /// @notice Returns the full {Job} struct for `jobId`.

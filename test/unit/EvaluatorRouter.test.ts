@@ -12,10 +12,10 @@ import {
 } from "viem";
 
 import {
-  JobStatus,
   DEFAULT_BUDGET,
   DEFAULT_DISPUTE_WINDOW,
   deployStack,
+  deployNoopHook,
   blockTimestamp,
   advanceSeconds,
   createFundedSubmittedJob,
@@ -192,13 +192,18 @@ describe("EvaluatorRouterUpgradeable", async () => {
 
     it("rejects job whose hook != router", async () => {
       const ctx = await setup();
+      // After audit L05 the kernel rejects hook == address(0) at createJob.
+      // Use a benign IACPHook implementation so the job creates successfully
+      // but `job.hook != router`, which is what registerJob is meant to
+      // reject.
+      const noopHook = await deployNoopHook(viem);
       const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
       await commerceAsClient.write.createJob([
         provider,
         ctx.router.address,
         await futureTs(3600),
         "",
-        zeroAddress,
+        noopHook.address,
       ]);
       const routerAsClient = await asRouter(ctx.router.address, clientW);
       await assert.rejects(
@@ -406,6 +411,131 @@ describe("EvaluatorRouterUpgradeable", async () => {
       }>;
       assert.equal(completed.length, 1);
       assert.equal(completed[0].args.reason, wrappedReason);
+    });
+  });
+
+  // ==================================================================
+  // Audit regressions
+  // ==================================================================
+
+  describe("audit regressions", () => {
+    async function seedAndFundOpenJob(
+      ctx: Awaited<ReturnType<typeof setup>>,
+      opts: { expiresIn?: number } = {},
+    ) {
+      const expiresIn = opts.expiresIn ?? 3600;
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        ctx.router.address,
+        await futureTs(expiresIn),
+        "L03 regression",
+        ctx.router.address,
+      ]);
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
+      await routerAsClient.write.registerJob([1n, ctx.policy.address]);
+      await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
+      await ctx.token.write.mint([client, DEFAULT_BUDGET]);
+      const tokenAsClient = await asToken(ctx.token.address, clientW);
+      await tokenAsClient.write.approve([ctx.commerce.address, DEFAULT_BUDGET]);
+      await commerceAsClient.write.fund([1n, DEFAULT_BUDGET, "0x"]);
+      return { commerceAsClient, routerAsClient };
+    }
+
+    // [L03] Registering a routed job bumps Router-side bookkeeping so
+    //       setCommerce can reason about whether a kernel switch is safe.
+    it("[L03] registerJob increments inflightJobCount", async () => {
+      const ctx = await setup();
+      assert.equal(await ctx.router.read.inflightJobCount(), 0n);
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        ctx.router.address,
+        await futureTs(3600),
+        "",
+        ctx.router.address,
+      ]);
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
+      await routerAsClient.write.registerJob([1n, ctx.policy.address]);
+      assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+    });
+
+    // [L03] Settling a routed job to APPROVE drives commerce.complete →
+    //       afterAction(COMPLETE_SELECTOR) → counter decrements.
+    it("[L03] settle(APPROVE) decrements inflightJobCount via afterAction", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+      await ctx.router.write.settle([jobId, "0x"]);
+      assert.equal(await ctx.router.read.inflightJobCount(), 0n);
+      assert.equal(getAddress(await ctx.router.read.jobPolicy([jobId])), getAddress(zeroAddress));
+    });
+
+    // [L03] An Open-state direct reject by the client also flows through
+    //       afterAction(REJECT) and zeros the counter.
+    it("[L03] kernel-direct reject(Open) decrements inflightJobCount", async () => {
+      const ctx = await setup();
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        ctx.router.address,
+        await futureTs(3600),
+        "",
+        ctx.router.address,
+      ]);
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
+      await routerAsClient.write.registerJob([1n, ctx.policy.address]);
+      assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+
+      const ZERO_BYTES32 = ("0x" + "00".repeat(32)) as `0x${string}`;
+      await commerceAsClient.write.reject([1n, ZERO_BYTES32, "0x"]);
+      assert.equal(await ctx.router.read.inflightJobCount(), 0n);
+    });
+
+    // [L03] setCommerce blocks the kernel switch while any routed job is
+    //       still in flight so escrow on the old kernel is never orphaned.
+    it("[L03] setCommerce reverts HasInflightJobs while jobs are pending", async () => {
+      const ctx = await setup();
+      await seedAndFundOpenJob(ctx);
+      assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+
+      await ctx.router.write.pause();
+      await assert.rejects(ctx.router.write.setCommerce([ctx.commerce.address]), /HasInflightJobs/);
+    });
+
+    // [L03] After every routed job has been reconciled, setCommerce
+    //       succeeds. Drives the full drain SOP end-to-end.
+    it("[L03] markExpired closes the claimRefund accounting gap → setCommerce unblocks", async () => {
+      const ctx = await setup();
+      await seedAndFundOpenJob(ctx, { expiresIn: 600 });
+      assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+
+      // Job exits via the non-hookable claimRefund path → Router-side
+      // counter is unchanged unless markExpired is called.
+      await advanceSeconds(viem, 700);
+      await ctx.commerce.write.claimRefund([1n]);
+      assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+
+      await ctx.router.write.markExpired([1n]);
+      assert.equal(await ctx.router.read.inflightJobCount(), 0n);
+      assert.equal(getAddress(await ctx.router.read.jobPolicy([1n])), getAddress(zeroAddress));
+
+      await ctx.router.write.pause();
+      await ctx.router.write.setCommerce([ctx.commerce.address]);
+    });
+
+    // [L03] markExpired rejects calls before the kernel actually moves to
+    //       Expired (i.e. before claimRefund executes), so the counter
+    //       cannot be desynced from kernel state.
+    it("[L03] markExpired reverts NotExpired when status != Expired", async () => {
+      const ctx = await setup();
+      await seedAndFundOpenJob(ctx);
+      await assert.rejects(ctx.router.write.markExpired([1n]), /NotExpired/);
     });
   });
 });

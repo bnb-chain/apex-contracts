@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { getAddress, zeroAddress } from "viem";
+import { getAddress } from "viem";
 
 import {
   DEFAULT_BUDGET,
   JobStatus,
   deployCommerce,
   deployMockToken,
+  deployNoopHook,
   deployRouter,
   blockTimestamp,
 } from "./helpers.js";
@@ -50,13 +51,14 @@ describe("UUPS upgrades", async () => {
         commerce.address,
         { client: { wallet: clientW } },
       );
+      const noopHook = await deployNoopHook(viem);
       const expiredAt = (await blockTimestamp(viem)) + 3_600n;
       await commerceAsClient.write.createJob([
         provider,
         evaluator,
         expiredAt,
         "upgrade-seed",
-        zeroAddress,
+        noopHook.address,
       ]);
       await commerceAsClient.write.setBudget([1n, DEFAULT_BUDGET, "0x"]);
       await token.write.mint([client, DEFAULT_BUDGET]);

@@ -41,6 +41,13 @@ contract EvaluatorRouterUpgradeable is
     /// @dev `bytes4(keccak256("submit(uint256,bytes32,bytes)"))`
     bytes4 internal constant SUBMIT_SELECTOR = 0x9e63798d;
 
+    /// @dev `IACP.complete.selector` — kept as a constant so {afterAction}
+    ///      can do a tight `==` check without a `selector` lookup.
+    bytes4 internal constant COMPLETE_SELECTOR = IACP.complete.selector;
+
+    /// @dev `IACP.reject.selector`. See {COMPLETE_SELECTOR}.
+    bytes4 internal constant REJECT_SELECTOR = IACP.reject.selector;
+
     /// @notice Verdict returned by {IPolicy.check}.
     uint8 internal constant VERDICT_PENDING = 0;
     uint8 internal constant VERDICT_APPROVE = 1;
@@ -51,10 +58,21 @@ contract EvaluatorRouterUpgradeable is
     // ---------------------------------------------------------------
 
     /// @custom:storage-location erc7201:apex.router.storage.v1
+    /// @dev Append-only. Reordering or removing fields is a storage-layout
+    ///      break and requires a fresh ERC-7201 namespace.
     struct RouterStorage {
         IACP commerce;
         mapping(uint256 jobId => address policy) jobPolicy;
         mapping(address policy => bool whitelisted) policyWhitelist;
+        /// @notice Number of jobs currently bound to this Router whose
+        ///         terminal status (Completed / Rejected / Expired) has not
+        ///         yet been reflected back into Router-side bookkeeping.
+        ///         Increments on {registerJob}; decrements on the kernel's
+        ///         post-action callback for `complete` / `reject`, or via
+        ///         {markExpired} for the non-hookable `claimRefund` path.
+        ///         Gates {setCommerce} so the Router cannot be repointed at a
+        ///         new kernel while jobs are still in flight (audit L03).
+        uint256 jobInflightCount;
     }
 
     /// @dev
@@ -83,6 +101,12 @@ contract EvaluatorRouterUpgradeable is
     ///         `keccak256(abi.encode(policy, reason))` so each kernel reason is uniquely
     ///         namespaced to the policy that produced it.
     event JobSettled(uint256 indexed jobId, address indexed policy, uint8 indexed verdict, bytes32 reason);
+    /// @notice Emitted when a routed job's terminal status is reflected back
+    ///         into Router-side bookkeeping (audit L03). `status` is the
+    ///         kernel status read at finalisation time:
+    ///           - `Completed` / `Rejected`: synthetic; afterAction-driven.
+    ///           - `Expired`: explicit, via {markExpired} after `claimRefund`.
+    event JobFinalised(uint256 indexed jobId, IACP.JobStatus indexed status);
 
     // ---------------------------------------------------------------
     // Errors
@@ -100,6 +124,16 @@ contract EvaluatorRouterUpgradeable is
     error NotDecided();
     error NotPaused();
     error UnknownVerdict(uint8 verdict);
+    /// @notice Thrown by {setCommerce} when {jobInflightCount} is non-zero;
+    ///         repointing the Router at a new kernel before all in-flight
+    ///         jobs are drained would orphan their escrow on the old one
+    ///         (audit L03).
+    error HasInflightJobs();
+    /// @notice Thrown by {markExpired} when the underlying job has not yet
+    ///         transitioned to the kernel's `Expired` status. {afterAction}
+    ///         already handles `Completed` / `Rejected`, so {markExpired} is
+    ///         exclusively the `claimRefund` reconciliation path.
+    error NotExpired();
 
     // ---------------------------------------------------------------
     // Initialisation
@@ -140,13 +174,22 @@ contract EvaluatorRouterUpgradeable is
     }
 
     /// @notice Point the Router at a different ERC-8183 kernel.
-    /// @dev    Only allowed while paused so admin can first drain in-flight
-    ///         jobs (via natural completion or `claimRefund` on the kernel).
-    ///         Intended as a migration hatch; see §6 R6 "Router drain SOP".
+    /// @dev    Only allowed while paused AND while no jobs remain in flight
+    ///         (audit L03). The drain SOP is:
+    ///           1. `pause()` to block new {registerJob} / {settle}.
+    ///           2. Let in-flight jobs reach a terminal status:
+    ///              - `complete` / `reject` decrements `jobInflightCount`
+    ///                automatically via {afterAction}.
+    ///              - For jobs that exit via the non-hookable `claimRefund`
+    ///                path on the kernel (status → `Expired`), anyone calls
+    ///                {markExpired} to reconcile Router-side state.
+    ///           3. Once `inflightJobCount() == 0`, `setCommerce` succeeds.
+    ///         See `docs/design.md` §6 R6 "Router drain SOP".
     function setCommerce(address newCommerce) external onlyOwner {
         if (newCommerce == address(0)) revert ZeroAddress();
         if (!paused()) revert NotPaused();
         RouterStorage storage $ = _router();
+        if ($.jobInflightCount != 0) revert HasInflightJobs();
         address old = address($.commerce);
         $.commerce = IACP(newCommerce);
         emit CommerceSet(old, newCommerce);
@@ -184,6 +227,12 @@ contract EvaluatorRouterUpgradeable is
         return _router().policyWhitelist[policy];
     }
 
+    /// @notice Number of routed jobs whose terminal status has not yet been
+    ///         reflected into Router-side bookkeeping (audit L03).
+    function inflightJobCount() external view returns (uint256) {
+        return _router().jobInflightCount;
+    }
+
     // ---------------------------------------------------------------
     // Client-facing: register a job with a policy
     // ---------------------------------------------------------------
@@ -195,7 +244,12 @@ contract EvaluatorRouterUpgradeable is
     ///           - `job.hook      == address(this)`.
     ///           - `policy` is whitelisted.
     ///           - Policy has not been set for this job.
-    function registerJob(uint256 jobId, address policy) external whenNotPaused {
+    ///         `nonReentrant` is defence-in-depth (audit I06): today the only
+    ///         external call is `commerce.getJob(...)` (a view), so a re-entry
+    ///         is impossible. The guard locks in the CEI ordering so a future
+    ///         policy upgrade that needs to perform an external write here
+    ///         cannot accidentally regress the property.
+    function registerJob(uint256 jobId, address policy) external nonReentrant whenNotPaused {
         RouterStorage storage $ = _router();
         if (!$.policyWhitelist[policy]) revert PolicyNotWhitelisted();
         if ($.jobPolicy[jobId] != address(0)) revert PolicyAlreadySet();
@@ -207,7 +261,31 @@ contract EvaluatorRouterUpgradeable is
         if (job.hook != address(this)) revert RouterNotHook();
 
         $.jobPolicy[jobId] = policy;
+        unchecked {
+            ++$.jobInflightCount;
+        }
         emit JobRegistered(jobId, policy, msg.sender);
+    }
+
+    /// @notice Reconcile a `claimRefund`-driven exit (kernel status =
+    ///         `Expired`) into Router-side bookkeeping.
+    /// @dev    Permissionless. Required because `claimRefund` MUST NOT be
+    ///         hookable per ERC-8183 (and because the kernel guarantees that
+    ///         escape hatch is non-revertible), so {afterAction} cannot
+    ///         observe it. {markExpired} closes the resulting accounting gap
+    ///         so {setCommerce}'s `jobInflightCount == 0` requirement is
+    ///         actually reachable (audit L03).
+    function markExpired(uint256 jobId) external nonReentrant {
+        RouterStorage storage $ = _router();
+        if ($.jobPolicy[jobId] == address(0)) revert PolicyNotSet();
+        IACP.Job memory job = $.commerce.getJob(jobId);
+        if (job.status != IACP.JobStatus.Expired) revert NotExpired();
+
+        delete $.jobPolicy[jobId];
+        unchecked {
+            --$.jobInflightCount;
+        }
+        emit JobFinalised(jobId, IACP.JobStatus.Expired);
     }
 
     // ---------------------------------------------------------------
@@ -268,6 +346,14 @@ contract EvaluatorRouterUpgradeable is
     ///         `optParams` are transported unchanged so policies can bind
     ///         extra commitments (URI, manifest hash, ZK public inputs, ...)
     ///         without requiring a Router upgrade.
+    ///
+    ///         On `COMPLETE` / `REJECT` the Router also reconciles its
+    ///         {jobInflightCount} so {setCommerce} can be unlocked once every
+    ///         routed job has reached a terminal state (audit L03). The guard
+    ///         `jobPolicy[jobId] != 0` prevents double-decrement and absorbs
+    ///         the legitimate corner case of an Open-state `reject` on a
+    ///         routed job that never made it past {registerJob}.
+    ///
     ///         NOT `nonReentrant` (see {beforeAction}).
     function afterAction(uint256 jobId, bytes4 selector, bytes calldata data) external override {
         RouterStorage storage $ = _router();
@@ -278,6 +364,17 @@ contract EvaluatorRouterUpgradeable is
             if (policy == address(0)) revert PolicyNotSet();
             (bytes32 deliverable, bytes memory optParams) = abi.decode(data, (bytes32, bytes));
             IPolicy(policy).onSubmitted(jobId, deliverable, optParams);
+        } else if (selector == COMPLETE_SELECTOR || selector == REJECT_SELECTOR) {
+            if ($.jobPolicy[jobId] != address(0)) {
+                delete $.jobPolicy[jobId];
+                unchecked {
+                    --$.jobInflightCount;
+                }
+                emit JobFinalised(
+                    jobId,
+                    selector == COMPLETE_SELECTOR ? IACP.JobStatus.Completed : IACP.JobStatus.Rejected
+                );
+            }
         }
     }
 

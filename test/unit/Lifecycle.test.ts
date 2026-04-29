@@ -121,14 +121,18 @@ describe("End-to-end lifecycle", async () => {
 
   it("Expiry escape hatch: claimRefund returns funds without router involvement", async () => {
     const ctx = await setup();
+    // `expiresIn` MUST satisfy `now + disputeWindow <= expiredAt` after the
+    // audit L07 fix in {OptimisticPolicy.onSubmitted}. Use 2x default
+    // disputeWindow so submission succeeds and we still race past expiry.
+    const expiresIn = DEFAULT_DISPUTE_WINDOW * 2n;
     const { jobId } = await createFundedSubmittedJob(viem, {
       ...ctx,
       client: clientW,
       provider: providerW,
-      expiresIn: 600n, // 10 min
+      expiresIn,
     });
     // Don't settle; fast-forward past expiry.
-    await advanceSeconds(viem, 3700);
+    await advanceSeconds(viem, Number(expiresIn) + 100);
 
     // Even paused Router + paused Commerce cannot block this call per plan §6 R6.
     await ctx.router.write.pause();

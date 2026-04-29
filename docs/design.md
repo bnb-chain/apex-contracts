@@ -1,6 +1,6 @@
 # APEX v1 · Design
 
-> Status: DRAFT · Author: BNB Chain · Last updated: 2026-04-22
+> Status: DRAFT · Author: BNB Chain · Last updated: 2026-04-28
 >
 > Authoritative design document for APEX v1. It reflects the current
 > on-chain code and is updated whenever behaviour changes. ERC-8183
@@ -83,14 +83,15 @@ Three decoupled layers:
 
 ## 3 · Roles
 
-| Role               | Permissions                                                    | Typical holder |
-| ------------------ | -------------------------------------------------------------- | -------------- |
-| **Commerce Owner** | `setPlatformFee`, `pause`, UUPS upgrade                        | Multisig       |
-| **Router Owner**   | `setPolicyWhitelist`, `setCommerce` (paused), `pause`, upgrade | Multisig       |
-| **Policy Admin**   | `addVoter`, `removeVoter`, `setQuorum`, `transferAdmin`        | Per-policy     |
-| **Voter**          | `voteReject(jobId)`                                            | Whitelist addr |
-| **Client**         | `createJob`, `setBudget`, `fund`, `registerJob`, `dispute`     | 1 per job      |
-| **Provider**       | `submit`, `settle` (permissionless but usually provider)       | 1 per job      |
+| Role               | Permissions                                                                       | Typical holder |
+| ------------------ | --------------------------------------------------------------------------------- | -------------- |
+| **Commerce Owner** | `setPlatformFee` (≤ 10%), `pause`, UUPS upgrade                                   | Multisig       |
+| **Router Owner**   | `setPolicyWhitelist`, `setCommerce` (paused + drained), `pause`, UUPS upgrade     | Multisig       |
+| **Policy Admin**   | `addVoter`, `removeVoter`, `setQuorum`, `transferAdmin`                           | Per-policy     |
+| **Voter**          | `voteReject(jobId)`                                                               | Whitelist addr |
+| **Client**         | `createJob`, `setBudget`, `fund`, `registerJob`, `dispute`                        | 1 per job      |
+| **Provider**       | `submit`, `settle` (permissionless but usually provider)                          | 1 per job      |
+| **Anyone**         | `claimRefund` (after expiry), `router.markExpired` (closes the bookkeeping after) | —              |
 
 ---
 
@@ -170,28 +171,44 @@ Day 4   │ Anyone (typically Client)
         │             └─ 100 USDC → Client ✅
 ```
 
-> Rule 1 (`disputed && rejectVotes ≥ voteQuorum → Reject`) does **not**
-> require `disputeWindow` to elapse first. Once quorum is reached, `settle`
-> can reject immediately.
+> Rule 1 (`disputed && rejectVotes ≥ snapshot quorum → Reject`) does
+> **not** require `disputeWindow` to elapse first. Once quorum is
+> reached, `settle` can reject immediately. The "snapshot quorum" is the
+> value of `voteQuorum` recorded at the time `dispute()` was called —
+> later admin updates do not change the rejection threshold for a
+> dispute already in flight (audit L08).
 
-### 4.4 · Flow C — Disputed stalemate → Expired (fallback)
+### 4.4 · Flow C — Disputed stalemate → race (auto-approve OR Expired)
 
 ```
-Day 0-1 │ … same as Flow A (expiredAt = Day 30)
-Day 2   │ Client disputes
-Day 2-30│ Only 1 voter casts voteReject (quorum = 3, never reached)
+Day 0-1  │ … same as Flow A (expiredAt = Day 30, disputeWindow = 3d)
+Day 2    │ Client disputes
+Day 2-5  │ Only 1 voter casts voteReject (quorum = 3, never reached)
 
-Day 4   │ Anyone → router.settle(jobId, "")
-        │   policy.check() → (Pending, 0)
-        │   router reverts with NotDecided       ← Provider cannot pull
-
-Day 4-30│ Deadlock. No one can advance the state machine.
-
-Day 30  │ Anyone (typically Client)
-        │   └─ commerce.claimRefund(jobId)                       [Expired]
-        │        └─ 100 USDC → Client ✅
-        │   (Policy state is orphaned but harmless; jobId never reused)
+Day 5    │ disputeWindow elapses with quorum unreached.
+         │ policy.check() falls through to the default-approve branch:
+         │   (Approve, REASON_APPROVED)        ← audit H01: silence by
+         │                                       voters approves regardless
+         │                                       of whether dispute was raised
+Day 5-30 │ Race window:
+         │   Anyone (typically Provider) → router.settle(jobId, "")
+         │     → commerce.complete(jobId, ...)                  [Completed]
+         │     → 95 USDC → Provider ✅ (5% fee → treasury)
+         │ OR
+         │   Anyone (typically Client)  → commerce.claimRefund(jobId)
+         │     → 100 USDC → Client ✅                            [Expired]
+         │
+         │ Whoever moves first wins. Providers MUST settle before
+         │ expiredAt to collect; otherwise the client can refund.
 ```
+
+> Rationale for the auto-approve fall-through (audit H01): without it,
+> a zero-cost `dispute()` would pin every legitimately submitted job at
+> PENDING forever, letting the client recover the escrow at expiry while
+> the provider receives nothing. Treating voter silence as approval —
+> identical to the undisputed path — restores the optimistic game-
+> theoretic balance: a dispute is only effective when voters back it up
+> within the window.
 
 ### 4.5 · Flow D — Cancel while Open
 
@@ -209,17 +226,30 @@ Day 0  │ Client fund                                              [Funded]
 Day 0-30│ Provider never submits
 Day 30 │ Anyone → commerce.claimRefund(jobId)                    [Expired]
        │    100 USDC → Client ✅
+       │
+       │ (Router drain bookkeeping, audit L03)
+       │ Anyone → router.markExpired(jobId)
+       │    jobInflightCount−−
+       │    jobPolicy[jobId] = 0
 ```
+
+> `claimRefund` is intentionally non-hookable, so the Router cannot
+> observe this exit through `afterAction`. `markExpired` is the
+> permissionless reconciliation entry that lets the Router-side
+> counter return to zero — required before `setCommerce` will accept
+> a kernel switch (R6 drain SOP).
 
 ### 4.7 · Economic outcomes
 
-| Path                | Client balance | Provider balance | Duration                |
-| ------------------- | -------------- | ---------------- | ----------------------- |
-| A · Happy           | −100           | +95 (5% fee)     | Min 3 days              |
-| B · Rejected        | 0              | 0                | ≤3 days (prompt voting) |
-| C · Stalemate       | 0              | 0                | Up to `expiredAt`       |
-| D · Open cancel     | 0              | 0                | Immediate               |
-| E · Never submitted | 0              | 0                | Up to `expiredAt`       |
+| Path                                              | Client balance | Provider balance | Duration                |
+| ------------------------------------------------- | -------------- | ---------------- | ----------------------- |
+| A · Happy                                         | −100           | +95 (5% fee)     | Min 3 days              |
+| B · Rejected                                      | 0              | 0                | ≤3 days (prompt voting) |
+| C · Disputed → window elapses → 1st-mover race:   |                |                  |                         |
+| &nbsp;&nbsp;&nbsp;&nbsp;C₁ Provider settles first | −100           | +95 (5% fee)     | After `disputeWindow`   |
+| &nbsp;&nbsp;&nbsp;&nbsp;C₂ Client refunds first   | 0              | 0                | After `expiredAt`       |
+| D · Open cancel                                   | 0              | 0                | Immediate               |
+| E · Never submitted                               | 0              | 0                | After `expiredAt`       |
 
 ---
 
@@ -235,18 +265,65 @@ Day 30 │ Anyone → commerce.claimRefund(jobId)                    [Expired]
   **Never reorder or remove fields**; only append by shrinking `__gap`.
 - **ERC-8183 surface** (all `MUST` + `SHOULD`): `createJob`, `setProvider`,
   `setBudget`, `fund`, `submit`, `complete`, `reject`, `claimRefund`.
-  - `setBudget` callable by client or provider.
+  - `setProvider` reverts with `ProviderAlreadySet` (audit I05) when
+    `job.provider != 0`. The dedicated error lets clients distinguish
+    "already bound" from a generic status mismatch.
+  - `setBudget` callable by client or provider. `amount == 0` reverts
+    with `ZeroBudget` (audit I02), so the kernel can treat
+    `Funded ⇒ budget > 0` as a hard invariant.
   - `fund(jobId, expectedBudget, optParams)` enforces `job.budget ==
 expectedBudget` as front-running protection.
   - `claimRefund` is **not** `whenNotPaused` and **not** hookable — this is
     the universal escape hatch.
   - Hook dispatch goes through `HOOK_GAS_LIMIT = 1_000_000` and verifies
     `IACPHook` via ERC-165 at `createJob` time.
-- **Events:** aligned with the ERC-8183 standard set. Event signatures
-  match the normative spec except `JobCreated`, which appends a
-  non-indexed `hook` address (matching the ERC reference implementation
-  so that ref-impl-ABI indexers stay compatible).
+  - `createJob` rejects `hook == address(0)` with `HookRequired` (audit L05)
+    and rejects `expiredAt > now + MAX_EXPIRY_DURATION` (`365 days`,
+    audit L01) so escrow can never be locked beyond a well-defined
+    horizon. `createJob` invokes `_afterHook` only — `_beforeHook` is
+    intentionally absent so a hook cannot veto its own installation
+    (audit I09; documented as Delta 1.3 in the compliance doc).
+  - `submit` rejects `block.timestamp >= job.expiredAt` with
+    `WrongStatus`, mirroring `fund` (audit L02). Late submissions
+    cannot be front-run by `claimRefund`. The `deliverable` hash is
+    persisted to the `Job` struct in addition to the `JobSubmitted`
+    event (audit I05) so on-chain consumers — verifying policies,
+    arbitration contracts, reputation registries — can read it
+    directly via `getJob(jobId)` without rebuilding state from logs.
+- **Events:** aligned with the ERC-8183 standard set. Two deliberate
+  ABI superset deviations:
+  - `JobCreated` appends a non-indexed `hook` address.
+  - `JobFunded` appends an indexed `provider` topic so providers can
+    `eth_getLogs` for jobs assigned to them without joining against
+    `JobCreated` (audit I03). Both are documented in
+    `docs/erc-8183-compliance.md` Delta 1.
 - **Admin:** `setPlatformFee(feeBP, treasury)`, `pause`, `unpause`.
+  `setPlatformFee` is hard-capped at `MAX_PLATFORM_FEE_BP = 1_000`
+  (10%, audit I07) — even a compromised owner cannot route more than
+  10% of any future settlement to the treasury. The cap is a
+  `constant`, so raising it requires a UUPS upgrade.
+- **Token assumption — deploy contract, not a v2 todo (audit I01):**
+  the kernel supports **plain ERC-20s only**. `fund` performs a single
+  `safeTransferFrom(client, this, budget)` and trusts the post-transfer
+  balance to equal `budget`; it does NOT reconcile pre/post `balanceOf`.
+  This is intentional v1 scope. The following classes will cause
+  silent escrow drift and revert at settlement (clients still recover
+  via `claimRefund` after `expiredAt`, but providers and treasury
+  cannot collect):
+  - fee-on-transfer / reflection / deflationary tokens,
+  - rebasing / elastic-supply tokens,
+  - tokens with mid-lifecycle blocklists or fee toggles,
+  - any token whose `balanceOf(address)` can decrease without an
+    outgoing `transfer` from `address`.
+
+  Confirming `paymentToken` against the token's source is part of the
+  pre-deploy checklist in `README.md`. The runtime warning lives on
+  the `paymentToken` storage NatSpec and on the `initialize` and
+  `fund` function NatSpec, so etherscan / IDE / SDK introspection all
+  surface it. Adding `balanceOf`-delta reconciliation in `fund` is
+  out of scope for v1 (BNB Chain stablecoins do not need it; the gas
+  cost is not justified for the typical case).
+
 - **Not implemented (intentional):** `fundWithPermit`, ERC-2771
   meta-transactions, `AccessControl` multi-role (we use `Ownable2Step`),
   hook whitelist, `evaluatorFeeBP`.
@@ -258,8 +335,10 @@ expectedBudget` as front-running protection.
   - `IACPHook`.
 - **Storage:** ERC-7201 namespace `apex.router.storage.v1`. Fields:
   `commerce`, `mapping(uint256 => address) jobPolicy`,
-  `mapping(address => bool) policyWhitelist`. **Never change the
-  namespace**; only append to `RouterStorage`.
+  `mapping(address => bool) policyWhitelist`,
+  `uint256 jobInflightCount` (audit L03; appended in PR-3, gates
+  `setCommerce`). **Never change the namespace**; only append to
+  `RouterStorage`.
 - **Pause semantics:** `pause()` is the emergency brake. It blocks
   `registerJob` **and** `settle` (new jobs and new verdict write-backs).
   `beforeAction` / `afterAction` are **not** gated by pause — they are
@@ -273,11 +352,14 @@ expectedBudget` as front-running protection.
     2. It enables the "stop new / drain old" SOP in R6 — pause first,
        then either upgrade in place or deploy a fresh Router.
 - **Public functions:**
-  - `registerJob(uint256 jobId, address policy)` — `whenNotPaused`.
-    Caller MUST be `commerce.jobs(jobId).client`. Job MUST be Open.
-    `job.evaluator == address(this)` and `job.hook == address(this)`.
-    `policyWhitelist[policy] == true`. One-shot:
-    `jobPolicy[jobId] == address(0)`.
+  - `registerJob(uint256 jobId, address policy)` — `whenNotPaused` +
+    `nonReentrant` (audit I06; defence-in-depth — current external
+    surface is a `view`, but the guard locks in CEI for any future
+    policy upgrade). Caller MUST be `commerce.jobs(jobId).client`. Job
+    MUST be Open. `job.evaluator == address(this)` and
+    `job.hook == address(this)`. `policyWhitelist[policy] == true`.
+    One-shot: `jobPolicy[jobId] == address(0)`. On success, increments
+    `jobInflightCount` (audit L03).
   - `settle(uint256 jobId, bytes calldata evidence)` — permissionless,
     `nonReentrant` + `whenNotPaused`. Reads `policy = jobPolicy[jobId]`,
     calls `policy.check(jobId, evidence)`, then:
@@ -285,6 +367,12 @@ expectedBudget` as front-running protection.
     - `verdict == 2 (Reject)` → `commerce.reject(jobId, reason, "")`
     - `verdict == 0 (Pending)` → revert `NotDecided`
     - any other value → revert `UnknownVerdict(verdict)`
+  - `markExpired(uint256 jobId)` — permissionless, `nonReentrant`
+    (audit L03). Closes the bookkeeping gap left by the
+    non-hookable `claimRefund` path: reads `commerce.getJob(jobId)`,
+    requires `status == Expired`, then deletes `jobPolicy[jobId]` and
+    decrements `jobInflightCount`. Required before `setCommerce` can
+    succeed once any routed job has exited via `claimRefund`.
   - `beforeAction(jobId, selector, data)` — `IACPHook`. Requires
     `msg.sender == commerce`. On `fund` selector, enforces
     `jobPolicy[jobId] != 0` (prevents funding an unregistered job).
@@ -292,20 +380,37 @@ expectedBudget` as front-running protection.
     access control is `msg.sender == commerce` and the function sits on
     the reentrant path `settle → commerce.complete → router.afterAction`.
   - `afterAction(jobId, selector, data)` — `IACPHook`. Requires
-    `msg.sender == commerce`. On `submit` selector, decodes
-    `(bytes32 deliverable, bytes optParams)` and forwards both verbatim
-    to `policy.onSubmitted(jobId, deliverable, optParams)`. The Router
-    does NOT interpret `optParams` — it is transported so policies can
-    bind extra commitments (URI, manifest hash, ZK public inputs, ...)
-    without a Router upgrade. Other selectors: noop.
-    Same `nonReentrant` rationale.
+    `msg.sender == commerce`. - On `submit` selector, decodes `(bytes32 deliverable, bytes
+optParams)` and forwards both verbatim to
+    `policy.onSubmitted(jobId, deliverable, optParams)`. The Router
+    does NOT interpret `optParams` — it is transported so policies
+    can bind extra commitments (URI, manifest hash, ZK public inputs,
+    ...) without a Router upgrade. - On `complete` / `reject` selectors, when `jobPolicy[jobId] != 0`
+    the Router deletes the binding and decrements `jobInflightCount`
+    (audit L03; mirrors the bookkeeping driven by `markExpired` for
+    the `claimRefund` exit). The guard absorbs the legitimate
+    Open-state `reject` of a routed job that never made it past
+    `registerJob` — `jobPolicy` is zero in that case and the
+    counter is left untouched. - Other selectors: noop. - Same `nonReentrant` rationale as `beforeAction`.
   - `supportsInterface` — declares `IACPHook` and `IERC165`.
+  - `inflightJobCount() → uint256` — view; mirrors `RouterStorage.jobInflightCount`.
 - **Admin:**
   - `setPolicyWhitelist(address policy, bool status)`.
-  - `setCommerce(address newCommerce)` — allowed only while paused.
-    Migration hatch (see R5).
+  - `setCommerce(address newCommerce)` — allowed only while paused
+    AND while `jobInflightCount == 0` (audit L03). Migration hatch
+    (see R6 drain SOP).
   - `pause()` / `unpause()` — `onlyOwner`.
   - `_authorizeUpgrade` — `onlyOwner`.
+
+> **Reject path under Router (audit L06):** the Router is the
+> evaluator for every routed job, so the kernel's "evaluator-only
+> reject in `Funded` / `Submitted`" branch is reachable **only**
+> through `settle()` returning `VERDICT_REJECT`. There is no
+> Router-level admin reject — rejections are policy-driven (e.g.
+> `OptimisticPolicy` requires `dispute() + quorum`). Open-state
+> rejections remain client-driven via `commerce.reject(jobId, …)`,
+> and the Router observes the terminal transition through
+> `afterAction`.
 
 ### 5.3 · `OptimisticPolicy.sol`
 
@@ -316,35 +421,58 @@ expectedBudget` as front-running protection.
   `(commerce_, router_, admin_, disputeWindow_, initialQuorum_)`. Stores
   `commerce`, `router`, `disputeWindow` as immutable; seeds `admin` and
   `voteQuorum`. `initialQuorum_ == 0` reverts (`QuorumZero`).
-- **Mutable config:** `voteQuorum` (admin-updatable).
+- **Mutable config:** `voteQuorum` (admin-updatable). Live updates
+  do not affect in-flight disputes — see `disputeQuorumSnapshot` below
+  (audit L08).
 - **Per-job state:**
   - `mapping(uint256 => uint64) submittedAt`
   - `mapping(uint256 => bool)   disputed`
   - `mapping(uint256 => uint16) rejectVotes`
+  - `mapping(uint256 => uint16) disputeQuorumSnapshot` — quorum
+    threshold captured at `dispute()` time; used by `check()` /
+    `voteReject()` so admin updates after the dispute is open cannot
+    move the goalposts (audit L08).
   - `mapping(uint256 => mapping(address => bool)) hasVoted`
 - **Voter whitelist:** `mapping(address => bool) isVoter` with
   `uint16 activeVoterCount`.
 - **Functions:**
   - `onSubmitted(jobId, deliverable, optParams)` — router-only.
     `submittedAt[jobId]` is recorded on first call; a second call
-    reverts (`AlreadyInitialised`). `optParams` is accepted for
-    `IPolicy` compatibility and intentionally ignored by the optimistic
-    policy (not persisted to storage).
+    reverts (`AlreadyInitialised`). Reverts with `SubmissionTooLate`
+    when `block.timestamp + disputeWindow > job.expiredAt` so the
+    dispute window is structurally guaranteed to fit before
+    `claimRefund` becomes callable (audit L07). `optParams` is accepted
+    for `IPolicy` compatibility and intentionally ignored by the
+    optimistic policy (not persisted to storage).
   - `dispute(jobId)` — reads `commerce.getJob(jobId)` and requires the
     caller to be `job.client`. Reverts if `submittedAt == 0`
     (`NotSubmitted`), if already disputed (`AlreadyDisputed`), or if the
     dispute window has elapsed (`OutsideDisputeWindow`). Flips `disputed`
-    to `true`.
+    to `true` and snapshots the current `voteQuorum` into
+    `disputeQuorumSnapshot[jobId]` (audit L08).
   - `voteReject(jobId)` — voter-only (`NotVoter`). Requires `disputed ==
-true` (`NotSubmitted`) and first-time voter (`AlreadyVoted`). Records
-    the vote and increments `rejectVotes[jobId]`.
+true` (`NotDisputed`), first-time voter (`AlreadyVoted`), the kernel
+    job still in `Submitted` state (`WrongJobStatus`, audit I04 — voting
+    on a Completed/Rejected/Expired job has no settlement effect and only
+    wastes gas), and `block.timestamp < submittedAt + disputeWindow`
+    (`OutsideDisputeWindow`). The voting window mirrors the dispute
+    window so a voter cannot front-run a pending `settle` after the
+    window has closed and flip a default-approve verdict into REJECT —
+    enforcing the §4.4 statement that "a dispute is only effective when
+    voters back it up within the window". Records the vote and
+    increments `rejectVotes[jobId]`. Emits `QuorumReached` exactly on
+    the vote that first crosses `disputeQuorumSnapshot[jobId]`.
   - `check(jobId, evidence)` — router-only (enforced by caller context);
     `view`:
     - `submittedAt == 0` → `(Pending, 0)`
-    - `disputed` branch: `rejectVotes ≥ voteQuorum` →
-      `(Reject, REASON_REJECTED)`, otherwise `(Pending, 0)`.
-    - Non-disputed branch: `now ≥ submittedAt + disputeWindow` →
-      `(Approve, REASON_APPROVED)`, otherwise `(Pending, 0)`.
+    - `disputed && rejectVotes ≥ disputeQuorumSnapshot` →
+      `(Reject, REASON_REJECTED)`.
+    - Otherwise — `now ≥ submittedAt + disputeWindow` →
+      `(Approve, REASON_APPROVED)`. **This is also reached for
+      disputed jobs that fail to muster quorum within the window**
+      (audit H01); silence by voters auto-approves identically to the
+      undisputed path.
+    - Else → `(Pending, 0)`.
   - Admin:
     - `addVoter(addr)` — requires `!isVoter[addr]`; increments
       `activeVoterCount`.
@@ -424,26 +552,40 @@ hook. For all active routed jobs, the hook is therefore upgradeable.
 deviation in contract NatSpec and in `README.md`, so strict-compliance
 integrators can audit or skip the Router.
 
-**Defence-in-depth mitigations:**
+**Defence-in-depth mitigations (audit I08 — governance is `MUST`,
+not `SHOULD`):**
 
-1. **Governance — multisig everywhere.** Commerce Owner, Router Owner, and
-   Policy Admin MUST be multisigs (Gnosis Safe or equivalent); owner-level
-   thresholds SHOULD be `≥ 3-of-5`.
-2. **Timelock between Safe and proxies.** Recommended delays: 24h for
-   Router, 48h for Commerce. Policy admin ops (`addVoter` / `setQuorum`)
-   may stay at 0h since they are not safety-critical.
-3. **Operational default: never upgrade.** Treat the Router as effectively
-   immutable; only ship upgrades for critical bugs, and treat each upgrade
-   as a security incident.
-4. **Explicit NatSpec disclosure** on the Router contract header:
-   "Deviates from ERC-8183 SHOULD: hook is upgradeable via UUPS under
-   multisig + timelock governance."
-5. **README disclosure** — mirror the NatSpec in top-level docs.
-6. **Upgrade review SOP.** Every Router upgrade proposal must include:
+1. **Governance — multisig everywhere.** Commerce Owner, Router Owner,
+   and Policy Admin **MUST** be multisigs (Gnosis Safe or equivalent);
+   owner-level thresholds **MUST** be `≥ 3-of-5`. Single-key ownership
+   on either proxy is an immediate post-deploy mis-configuration that
+   blocks production rollout.
+2. **Timelock between Safe and proxies — non-optional.** A
+   `TimelockController` MUST sit between the multisig and each UUPS
+   proxy. Required delays: **48h for Commerce**, **24h for Router**.
+   Policy admin ops (`addVoter` / `setQuorum`) may stay at 0h since
+   they are not safety-critical, but ownership transfer of the policy
+   admin role itself SHOULD go through the same timelock.
+3. **Operational default: never upgrade.** Treat the Router as
+   effectively immutable; only ship upgrades for critical bugs, and
+   treat each upgrade as a security incident — incident report,
+   blameless post-mortem, and external review of the upgrade diff.
+4. **Explicit NatSpec disclosure** on the Router contract header
+   already encodes the deviation; the README and `docs/erc-8183-compliance.md`
+   mirror it. Strict-compliance integrators can audit or skip the
+   Router accordingly.
+5. **Upgrade review SOP.** Every Router upgrade proposal MUST include:
    (a) the new impl's git SHA; (b) a testnet-verified etherscan link;
    (c) a diff of `beforeAction` / `afterAction` (expected: no behaviour
    change); (d) explicit multisig sign-off that hook semantics for
-   in-flight jobs are unchanged.
+   in-flight jobs are unchanged; (e) confirmation that
+   `jobInflightCount` invariants survive the upgrade (storage append
+   only, no slot collision).
+6. **Prefer drain-and-redeploy over upgrade.** When a Router defect
+   needs a structural fix, prefer running the §6 R6 drain SOP and
+   deploying a fresh `Router2` rather than upgrading the existing
+   proxy in place. Upgrades are reserved for fixes that are too urgent
+   for the drain timeline.
 
 ### R2 · Router is the single hook entry for every routed job
 
@@ -460,11 +602,18 @@ selector-path tests; (c) Router owner on multisig; (d) clients always have
 
 If the entire voter set is offline or disengaged, every legitimately
 disputed job auto-approves once `disputeWindow` elapses. Silence is
-designed to mean approval but can instead mean absence.
+designed to mean approval but can instead mean absence. This applies
+**both** to undisputed jobs (Flow A) and to disputed jobs whose voters
+fail to reach quorum within the window (Flow C₁ in §4.7) — the audit
+H01 fix makes the two paths identical so a zero-cost dispute cannot
+freeze settlement.
 
 **Mitigations:** (a) this is an accepted trade-off for the optimistic
 design — no on-chain change in v1; (b) run `≥ 3 × voteQuorum` voters with
-24/7 monitoring to lower absence probability; (c) v2 may introduce
+24/7 monitoring to lower absence probability; (c) `disputeWindow` MUST
+fit fully before `expiredAt` — `OptimisticPolicy.onSubmitted` enforces
+this on every submit (audit L07) so a provider cannot be set up to lose
+payment by submitting too close to expiry; (d) v2 may introduce
 per-job `disputeWindow` so clients can opt into mandatory-review jobs.
 
 ### R4 · Voter collusion
@@ -484,7 +633,8 @@ not a strict ERC-8183 subset. The Router cannot plug directly into a
 third-party ERC-8183 kernel without an adapter.
 
 **Mitigations:** `Router.setCommerce(newCommerce)` is gated by
-`whenPaused`, giving admin a migration hatch once in-flight jobs are
+`whenPaused` AND `jobInflightCount == 0` (audit L03 — see R6),
+giving admin a migration hatch once in-flight jobs are demonstrably
 drained. A future `ACPAdapter` contract can bridge any spec-compliant
 kernel.
 
@@ -497,17 +647,39 @@ cannot be moved to a fresh contract.
 **Mitigation:** use the pause switches on both contracts to run a
 "stop new / drain old" SOP — never attempt in-flight rewrites.
 
-**Router drain SOP**
+**Router drain SOP (audit L03 + L04)**
 
 1. `RouterOwner → router.pause()` blocks **new** `registerJob` and
-   `settle`. `beforeAction` / `afterAction` remain unaffected, so other
-   kernel paths are not cascade-reverted.
-2. Investigate + fix. To swap routers, deploy `Router2` (new proxy), point
-   SDK / front-ends at it, and let new jobs flow through `Router2`. For
-   an internal fix, `router.upgradeToAndCall(...)` through UUPS.
-3. Unpause to let old-Router in-flight jobs finish. Jobs that cannot
-   settle wait for `expiredAt` and refund via `claimRefund`.
-4. Optional: permanently pause the old Router or mark it deprecated.
+   `settle`. `beforeAction` / `afterAction` remain unaffected, so
+   other kernel paths are not cascade-reverted. This is the
+   intentionally asymmetric pause semantics flagged by audit L04 —
+   asymmetry exists so a Router bug does not cascade-revert unrelated
+   `fund` / `submit` calls on the kernel; the universal client
+   escape (`commerce.claimRefund`) is never pausable nor hookable.
+2. Wait for routed jobs to reach a terminal kernel status. Three
+   exit paths exist; the Router-side counter `jobInflightCount`
+   tracks reconciliation:
+   - **Settle (Approve / Reject)** — `router.settle(jobId, …)` (or
+     a kernel-direct `complete` / `reject` for routed jobs that the
+     evaluator handles directly) drives `commerce.complete` /
+     `commerce.reject`, which fires `afterAction(complete | reject)`
+     and decrements `jobInflightCount` automatically.
+   - **claimRefund (kernel-direct refund)** — anyone calls
+     `commerce.claimRefund(jobId)` after `expiredAt`; the kernel
+     skips hooks (per ERC-8183 `MUST`), so the Router-side counter
+     is **not** decremented automatically. Anyone then calls
+     `router.markExpired(jobId)` to reconcile bookkeeping.
+   - **Open-state cancellation** — client calls
+     `commerce.reject(jobId, …)` while the job is still Open. The
+     Router observes the terminal transition through
+     `afterAction(reject)` and decrements automatically.
+3. Once `router.inflightJobCount() == 0`, `router.setCommerce(...)`
+   succeeds. Until that point, attempting to repoint the Router at
+   a new kernel reverts `HasInflightJobs` — escrow on the old
+   kernel can never be orphaned by a hot switch.
+4. Optional: permanently pause or deprecate the old Router after
+   migration; clients still keep `claimRefund` as the universal
+   escape hatch on the kernel.
 
 **Commerce drain SOP**
 
@@ -516,7 +688,9 @@ cannot be moved to a fresh contract.
    pause, so refund remains available.
 2. In-flight jobs past `expiredAt` can refund immediately via
    `claimRefund(jobId)`; jobs still within the window wait for
-   `expiredAt`.
+   `expiredAt`. After every routed job has refunded, run the Router
+   SOP above (`markExpired` per job) so the Router can also be
+   migrated cleanly if needed.
 3. Deploy `Commerce2`; new jobs flow through it.
 4. Permanently pause the old Commerce; the only live path is
    `claimRefund`, returning escrow to clients.
@@ -528,6 +702,9 @@ cannot be moved to a fresh contract.
   `claimRefund` on the old instance and re-create on the new one).
 - Force-settling an in-flight job stuck in a broken policy (wait for
   `expiredAt` and `claimRefund`).
+- `Router.setCommerce` while any routed job is still in flight on
+  the current kernel — the kernel switch would orphan their escrow
+  and break the `inflightJobCount` invariant.
 
 All fallback paths rely on the same invariant: `claimRefund` is the
 universal escape hatch — never pausable, never hookable, always callable
@@ -575,6 +752,7 @@ No blocking issues. Revisit in v2:
   hardhat-viem deploys in tests and scripts)
 - `contracts/mocks/MockERC20.sol`
 - `contracts/mocks/RevertingHook.sol`
+- `contracts/mocks/NoopHook.sol`
 - `contracts/mocks/AgenticCommerceV2Mock.sol`
 - `contracts/mocks/EvaluatorRouterV2Mock.sol`
 - `test/helpers.ts`
