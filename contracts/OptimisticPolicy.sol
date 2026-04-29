@@ -19,9 +19,11 @@ import {IPolicy} from "./IPolicy.sol";
 ///         2. Client MAY call `dispute(jobId)` within `disputeWindow`. The
 ///            current `voteQuorum` is snapshotted so subsequent admin
 ///            updates do not move the goalposts on an in-flight dispute.
-///         3. Whitelisted voters MAY call `voteReject(jobId)` once each.
-///            Voting on a job whose kernel status is no longer `Submitted`
-///            reverts with `WrongJobStatus`.
+///         3. Whitelisted voters MAY call `voteReject(jobId)` once each,
+///            within the same `disputeWindow` that gates `dispute`. Votes
+///            cast at or after `submittedAt + disputeWindow` revert with
+///            `OutsideDisputeWindow`. Voting on a job whose kernel status
+///            is no longer `Submitted` reverts with `WrongJobStatus`.
 ///         4. `check(jobId, _)` returns:
 ///              - APPROVE  if `submittedAt + disputeWindow` has elapsed AND
 ///                the disputed branch has not reached its quorum snapshot.
@@ -304,6 +306,16 @@ contract OptimisticPolicy is IPolicy {
     ///         reject any subsequent {settle}) and only wastes voter gas
     ///         and pollutes the on-chain log (audit I04).
     ///
+    ///         Reverts with `OutsideDisputeWindow` once
+    ///         `block.timestamp >= submittedAt + disputeWindow`. The voting
+    ///         window mirrors the dispute window: `[submittedAt, submittedAt
+    ///         + disputeWindow)`. Without this guard a voter could keep
+    ///         accumulating votes after the window closed and front-run a
+    ///         provider's pending {EvaluatorRouterUpgradeable.settle} to
+    ///         flip a default-approve verdict into a REJECT, defeating
+    ///         the §4.4 design statement that "a dispute is only effective
+    ///         when voters back it up within the window".
+    ///
     ///         {QuorumReached} is emitted exactly on the vote that first
     ///         crosses the snapshot threshold, matching the event's NatDoc.
     function voteReject(uint256 jobId) external {
@@ -312,6 +324,10 @@ contract OptimisticPolicy is IPolicy {
         if (hasVoted[jobId][msg.sender]) revert AlreadyVoted();
         if (commerce.getJob(jobId).status != IACP.JobStatus.Submitted) {
             revert WrongJobStatus();
+        }
+        uint64 ts = submittedAt[jobId];
+        if (block.timestamp >= uint256(ts) + uint256(disputeWindow)) {
+            revert OutsideDisputeWindow();
         }
 
         hasVoted[jobId][msg.sender] = true;

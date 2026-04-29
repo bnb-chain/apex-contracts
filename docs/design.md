@@ -451,12 +451,17 @@ optParams)` and forwards both verbatim to
     to `true` and snapshots the current `voteQuorum` into
     `disputeQuorumSnapshot[jobId]` (audit L08).
   - `voteReject(jobId)` — voter-only (`NotVoter`). Requires `disputed ==
-true` (`NotDisputed`), first-time voter (`AlreadyVoted`), and the
-    kernel job still in `Submitted` state (`WrongJobStatus`, audit
-    I04 — voting on a Completed/Rejected/Expired job has no settlement
-    effect and only wastes gas). Records the vote and increments
-    `rejectVotes[jobId]`. Emits `QuorumReached` exactly on the vote
-    that first crosses `disputeQuorumSnapshot[jobId]`.
+true` (`NotDisputed`), first-time voter (`AlreadyVoted`), the kernel
+    job still in `Submitted` state (`WrongJobStatus`, audit I04 — voting
+    on a Completed/Rejected/Expired job has no settlement effect and only
+    wastes gas), and `block.timestamp < submittedAt + disputeWindow`
+    (`OutsideDisputeWindow`). The voting window mirrors the dispute
+    window so a voter cannot front-run a pending `settle` after the
+    window has closed and flip a default-approve verdict into REJECT —
+    enforcing the §4.4 statement that "a dispute is only effective when
+    voters back it up within the window". Records the vote and
+    increments `rejectVotes[jobId]`. Emits `QuorumReached` exactly on
+    the vote that first crosses `disputeQuorumSnapshot[jobId]`.
   - `check(jobId, evidence)` — router-only (enforced by caller context);
     `view`:
     - `submittedAt == 0` → `(Pending, 0)`

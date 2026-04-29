@@ -202,6 +202,52 @@ describe("OptimisticPolicy", async () => {
       await assert.rejects(policyAsClient.write.dispute([jobId]), /OutsideDisputeWindow/);
     });
 
+    it("voteReject outside window reverts OutsideDisputeWindow", async () => {
+      const ctx = await setup();
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+      const policyAsClient = await asPolicy(ctx.policy.address, clientW);
+      await policyAsClient.write.dispute([jobId]);
+
+      // Advance past the dispute window. Job is still in Submitted (no settle
+      // yet), so the WrongJobStatus guard does NOT fire — the new window
+      // guard must.
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+
+      const policyAsV1 = await asPolicy(ctx.policy.address, voter1W);
+      await assert.rejects(policyAsV1.write.voteReject([jobId]), /OutsideDisputeWindow/);
+    });
+
+    it("post-window votes cannot flip an unresolved dispute from APPROVE to REJECT", async () => {
+      const ctx = await setup(); // quorum = 2
+      const { jobId } = await createFundedSubmittedJob(viem, {
+        ...ctx,
+        client: clientW,
+        provider: providerW,
+      });
+
+      const policyAsClient = await asPolicy(ctx.policy.address, clientW);
+      await policyAsClient.write.dispute([jobId]);
+
+      // 1 vote within window (< quorum of 2).
+      const policyAsV1 = await asPolicy(ctx.policy.address, voter1W);
+      await policyAsV1.write.voteReject([jobId]);
+
+      // Window closes. Job has not been settled yet — verdict must lock to
+      // APPROVE and the second voter must NOT be able to push the count to
+      // quorum after the window.
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+
+      const policyAsV2 = await asPolicy(ctx.policy.address, voter2W);
+      await assert.rejects(policyAsV2.write.voteReject([jobId]), /OutsideDisputeWindow/);
+
+      const [verdict] = await ctx.policy.read.check([jobId, "0x"]);
+      assert.equal(verdict, Verdict.Approve, "verdict frozen at APPROVE post-window");
+    });
+
     it("dispute before submit reverts NotSubmitted", async () => {
       const ctx = await setup();
       const policyAsClient = await asPolicy(ctx.policy.address, clientW);
