@@ -61,8 +61,8 @@ addresses and the treasury are operational details — look them up in
 | Contract                        | Address                                                                                                                        |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `AgenticCommerceUpgradeable`    | [`0xa206c0517B6371C6638CD9e4a42Cc9f02A33B0DE`](https://testnet.bscscan.com/address/0xa206c0517B6371C6638CD9e4a42Cc9f02A33B0DE) |
-| `EvaluatorRouterUpgradeable`    | [`0xD7d36D66d2F1B608A0F943f722D27e3744f66F25`](https://testnet.bscscan.com/address/0xD7d36D66d2F1B608A0F943f722D27e3744f66F25) |
-| `OptimisticPolicy`              | [`0x1fb48755361a34bbe728ccc55582116eec344214`](https://testnet.bscscan.com/address/0x1fb48755361a34bbe728ccc55582116eec344214) |
+| `EvaluatorRouterUpgradeable`    | [`0xd7d36d66d2f1b608a0f943f722d27e3744f66f25`](https://testnet.bscscan.com/address/0xd7d36d66d2f1b608a0f943f722d27e3744f66f25) |
+| `OptimisticPolicy`              | [`0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6`](https://testnet.bscscan.com/address/0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6) |
 | Payment token (USDC on testnet) | [`0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565`](https://testnet.bscscan.com/address/0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565) |
 
 Testnet `OptimisticPolicy` runs with a short dispute window for faster
