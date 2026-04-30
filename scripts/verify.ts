@@ -22,8 +22,8 @@ import {
  * Defaults (match `deploy.ts`):
  *   - Commerce / Router `initialize.owner_`  = deployer wallet
  *   - Policy constructor `admin_`            = deployer wallet
- *   - Policy `disputeWindow_`  = $DISPUTE_WINDOW_SECONDS (fallback 86400)
- *   - Policy `initialQuorum_`  = $INITIAL_QUORUM         (fallback 2)
+ *   - Policy `disputeWindow_`  = $DISPUTE_WINDOW_SECONDS (fallback 259200)
+ *   - Policy `initialQuorum_`  = $INITIAL_QUORUM         (fallback 3)
  *
  * Env overrides (only needed if ownership / admin has been transferred
  * BEFORE you got around to verifying):
@@ -100,8 +100,8 @@ async function main(): Promise<void> {
   const commerceInitialOwner = (envOpt("COMMERCE_INITIAL_OWNER") ?? deployer) as `0x${string}`;
   const routerInitialOwner = (envOpt("ROUTER_INITIAL_OWNER") ?? deployer) as `0x${string}`;
   const policyInitialAdmin = (envOpt("POLICY_INITIAL_ADMIN") ?? deployer) as `0x${string}`;
-  const disputeWindow = BigInt(envWithDefault("DISPUTE_WINDOW_SECONDS", "86400"));
-  const initialQuorum = Number(envWithDefault("INITIAL_QUORUM", "2"));
+  const disputeWindow = BigInt(envWithDefault("DISPUTE_WINDOW_SECONDS", "259200"));
+  const initialQuorum = Number(envWithDefault("INITIAL_QUORUM", "3"));
 
   // We need the ABIs of the impl contracts to recompute the initialize
   // calldata bytes that were baked into each ERC1967Proxy constructor.

@@ -103,8 +103,8 @@ async function main(): Promise<void> {
 
   const cfg = ADDRESSES[networkName] ?? {};
   const owner = deployer;
-  const disputeWindow = BigInt(env("DISPUTE_WINDOW_SECONDS", "86400"));
-  const initialQuorum = Number(env("INITIAL_QUORUM", "2"));
+  const disputeWindow = BigInt(env("DISPUTE_WINDOW_SECONDS", "259200"));
+  const initialQuorum = Number(env("INITIAL_QUORUM", "3"));
 
   // Cascade rule: blank paymentToken forces a full-stack rotation. Blank
   // commerceProxy alone also forces a fresh Router so we never end up with
