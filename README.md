@@ -71,11 +71,22 @@ mainnet deployment would use.
 
 ### BSC Mainnet (chainId 56)
 
-**Not yet officially deployed.** There is no canonical mainnet address set
-maintained by this repository today. Integrators who need a mainnet
-deployment today must roll their own — see
-[`docs/deployment.md`](./docs/deployment.md) for the deploy + verify +
-multisig-handoff runbook.
+Integrators only need the three proxies + the payment token. Implementation
+addresses and the treasury are operational details — look them up in
+[`scripts/addresses.ts`](./scripts/addresses.ts) if you need them.
+
+| Contract                           | Address                                                                                                                |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `AgenticCommerceUpgradeable`       | [`0xEa4DAa3100A767e86FDed867729ae7446476EBA6`](https://bscscan.com/address/0xEa4DAa3100A767e86FDed867729ae7446476EBA6) |
+| `EvaluatorRouterUpgradeable`       | [`0x51895229E12F9876011789B04f8698af06cCD6DA`](https://bscscan.com/address/0x51895229E12F9876011789B04f8698af06cCD6DA) |
+| `OptimisticPolicy`                 | [`0x9C01845705b3078Aa2e8cfF7520a6376FD766dE5`](https://bscscan.com/address/0x9C01845705b3078Aa2e8cfF7520a6376FD766dE5) |
+| Payment token (see `addresses.ts`) | [`0xcE24439F2D9C6a2289F741120FE202248B666666`](https://bscscan.com/address/0xcE24439F2D9C6a2289F741120FE202248B666666) |
+
+`OptimisticPolicy` constructor parameters (`disputeWindow`, `voteQuorum` at
+deploy, voter whitelist) are **immutable on-chain** — read them from the
+policy contract or your deploy logs; they are not duplicated here. See
+[`docs/deployment.md`](./docs/deployment.md) for deploy + verify +
+multisig-handoff.
 
 ## Getting started
 
