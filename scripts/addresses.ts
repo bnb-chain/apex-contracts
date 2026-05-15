@@ -57,7 +57,7 @@ export type DeployedAddresses = {
 
 export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
   bscTestnet: {
-    paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // e.g. USDC on BSC Testnet
+    paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // e.g. U on BSC Testnet
     treasury: "0x1001b2C085345f388778A975648aA50bcfd0D134",
     commerceProxy: "0xa206c0517b6371c6638cd9e4a42cc9f02a33b0de",
     commerceImpl: "0xc0b74dc6b1c95b1452f678741e7907290587d69b",
@@ -66,12 +66,12 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
     policy: "0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6",
   },
   bsc: {
-    paymentToken: "0xcE24439F2D9C6a2289F741120FE202248B666666", // e.g. USDC on BSC Mainnet
-    // treasury: "0x...",
-    // commerceProxy: "0x...",
-    // commerceImpl:  "0x...",
-    // routerProxy:   "0x...",
-    // routerImpl:    "0x...",
-    // policy:        "0x...",
+    paymentToken: "0xcE24439F2D9C6a2289F741120FE202248B666666", // e.g. U on BSC Mainnet
+    treasury: "0x000000000000000000000000000000000000dEaD",
+    commerceProxy: "0xea4daa3100a767e86fded867729ae7446476eba6",
+    commerceImpl: "0x2788d06576ef83fdbeb00fb848e9fd896fc259e6",
+    routerProxy: "0x51895229e12f9876011789b04f8698af06ccd6da",
+    routerImpl: "0xf0cf8f47e5c035f16247ff16e9f367e477ee5007",
+    policy: "0x9c01845705b3078aa2e8cff7520a6376fd766de5",
   },
 };
