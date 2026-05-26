@@ -58,7 +58,79 @@ on both proxies before touching them. Once ownership has been transferred
 to the production multisig, run impl upgrades and policy rotations from the
 multisig directly.
 
-## 3 · Rotating `paymentToken`
+## 3 · Writing a V2 implementation safely
+
+`AgenticCommerceUpgradeable` and `EvaluatorRouterUpgradeable` are
+UUPS-upgradeable. Once a proxy is live, **the storage layout of every
+subsequent implementation must remain byte-compatible with the deployed
+one** — UUPS only swaps the implementation pointer; it never migrates
+storage. A fresh implementation that declares, say, `address public
+owner` as its first state variable will alias onto Commerce's live
+`paymentToken` slot, permanently locking every `onlyOwner`-gated path.
+
+The three rules below are defense in depth — follow all three.
+
+### 3.1 · Build on the existing V1 source, don't reimplement
+
+The new implementation must either inherit `AgenticCommerceUpgradeable`
+(or `EvaluatorRouterUpgradeable`) directly, or be produced by editing
+that source in place. Never write a from-scratch contract that targets
+the same ABI — even when the external ABI matches, the storage layout
+almost certainly will not, and the proxy will brick on the first
+`onlyOwner` call.
+
+For method-only changes, use
+[`contracts/mocks/AgenticCommerceV2Mock.sol`](../contracts/mocks/AgenticCommerceV2Mock.sol)
+and [`contracts/mocks/EvaluatorRouterV2Mock.sol`](../contracts/mocks/EvaluatorRouterV2Mock.sol)
+as templates — both inherit V1, add no new state, and stay storage-safe
+by construction.
+
+### 3.2 · Add new state by appending — never insert, reorder, or remove
+
+When new state variables are required, edit the V1 source directly:
+append the field at the end of the existing declarations and shrink the
+reserved `__gap` by the number of slots consumed.
+
+For `AgenticCommerceUpgradeable` (flat layout, slots 0–5 plus
+`__gap[44]`):
+
+```solidity
+// In AgenticCommerceUpgradeable.sol, AFTER `jobHasBudget`,
+// BEFORE the existing __gap:
+address public newField;          // slot 6
+uint256[43] private __gap;        // was [44]
+```
+
+For `EvaluatorRouterUpgradeable` (ERC-7201 layout, namespace
+`apex.router.storage.v1`): append the new field to the `RouterStorage`
+struct. **Never change the namespace id.**
+
+**Never** reorder, remove, retype, or insert before existing fields in
+either contract.
+
+### 3.3 · Validate the storage layout before upgrading
+
+Before issuing the `upgradeToAndCall` transaction, run the OpenZeppelin
+storage-layout diff:
+
+```ts
+// scripts/validate-upgrade.ts (sketch)
+import hre from "hardhat";
+await hre.upgrades.validateUpgrade(
+  proxyAddress,
+  await hre.ethers.getContractFactory("AgenticCommerceV2"),
+  { kind: "uups" },
+);
+```
+
+`@openzeppelin/hardhat-upgrades` (backed by
+`@openzeppelin/upgrades-core`) compares the deployed implementation's
+layout against the new one and refuses upgrades that shift, remove, or
+retype any existing slot. It's the single most effective guardrail —
+even when §3.1 and §3.2 have been followed correctly, run the validator
+anyway.
+
+## 4 · Rotating `paymentToken`
 
 `paymentToken` is set in `commerce.initialize` and has no setter. To rotate
 it, **clear `paymentToken` in `scripts/addresses.ts`** and re-run
@@ -69,7 +141,7 @@ stay on-chain; any in-flight jobs against the old Commerce must drain via
 `oldCommerce.claimRefund(jobId)` after expiry (`claimRefund` is never
 pausable nor hookable).
 
-## 4 · Verify on the block explorer
+## 5 · Verify on the block explorer
 
 `scripts/verify.ts` reads [`scripts/addresses.ts`](../scripts/addresses.ts)
 plus the deploy params from `.env` and Etherscan-verifies the full stack
@@ -89,7 +161,7 @@ Both proxies AND their current UUPS implementations (`commerceImpl`,
 run, you paste them back into the same entry and commit, and `verify.ts`
 picks them up from that file.
 
-## 5 · Post-deploy ownership transfer
+## 6 · Post-deploy ownership transfer
 
 Deployer holds full control of Commerce / Router / Policy immediately after
 deploy. Transfer to the production multisig ASAP via the two-step flow (the
