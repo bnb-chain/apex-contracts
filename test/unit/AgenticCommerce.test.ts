@@ -620,6 +620,171 @@ describe("AgenticCommerceUpgradeable", async () => {
   });
 
   // ==================================================================
+  // Seller-side zero price
+  // ==================================================================
+
+  describe("seller-side zero price", () => {
+    it("provider may set budget == 0 (jobHasBudget flips true)", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+
+      const job = await commerce.read.getJob([1n]);
+      assert.equal(job.budget, 0n);
+      assert.equal(await commerce.read.jobHasBudget([1n]), true);
+    });
+
+    it("client cannot set budget == 0", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      await assert.rejects(
+        commerceAsClient.write.setBudget([1n, 0n, "0x"]),
+        /ZeroBudgetSellerOnly/,
+      );
+    });
+
+    it("budget == 0 cannot be set before a provider is bound", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      // Provider unset at creation → nobody satisfies `msg.sender == provider`.
+      await commerceAsClient.write.createJob([
+        zeroAddress,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      await assert.rejects(
+        commerceAsClient.write.setBudget([1n, 0n, "0x"]),
+        /ZeroBudgetSellerOnly/,
+      );
+    });
+
+    it("fund on a zero-budget job transitions to Funded without any transfer", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+
+      // No mint / approve: the client funds a free job with no allowance.
+      const txHash = await commerceAsClient.write.fund([1n, 0n, "0x"]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      const job = await commerce.read.getJob([1n]);
+      assert.equal(job.status, JobStatus.Funded);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+
+      const funded = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "JobFunded",
+      }) as unknown as Array<{ args: { jobId: bigint; amount: bigint } }>;
+      assert.equal(funded.length, 1);
+      assert.equal(funded[0].args.amount, 0n);
+    });
+
+    it("full zero-price happy path: complete pays nobody but reaches Completed", async () => {
+      const { token, commerce } = await setup();
+      // Non-zero fee to prove fee math also zeroes out.
+      await commerce.write.setPlatformFee([500n, treasury]);
+
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+      await commerceAsProvider.write.submit([1n, keccak256(toBytes("free")), "0x"]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      const txHash = await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Completed);
+
+      const released = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "PaymentReleased",
+      }) as unknown as Array<{ args: { jobId: bigint; amount: bigint } }>;
+      assert.equal(released.length, 1);
+      assert.equal(released[0].args.amount, 0n);
+    });
+
+    it("evaluator rejects a zero-budget Funded job with no refund transfer", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
+
+      assert.equal(await token.read.balanceOf([client]), 0n);
+      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Rejected);
+    });
+
+    it("zero-budget job expires to Expired via claimRefund with no transfer", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+
+      await advanceSeconds(viem, 3700);
+      await commerce.write.claimRefund([1n]);
+
+      assert.equal(await token.read.balanceOf([client]), 0n);
+      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Expired);
+    });
+  });
+
+  // ==================================================================
   // Admin
   // ==================================================================
 
@@ -720,10 +885,10 @@ describe("AgenticCommerceUpgradeable", async () => {
       );
     });
 
-    // [I02] setBudget(0) used to silently flip jobHasBudget to true and
-    //       leave fund() to fail with a confusing "ZeroBudget" path. The
-    //       kernel now rejects amount == 0 at the source.
-    it("[I02] setBudget rejects amount == 0 with ZeroBudget", async () => {
+    // [I02] setBudget(0) used to be rejected outright. Seller-side zero price
+    //       now permits a *provider* to set amount == 0, but a *client* still
+    //       cannot zero out the price unilaterally (ZeroBudgetSellerOnly).
+    it("[I02] setBudget rejects a client-set amount == 0 with ZeroBudgetSellerOnly", async () => {
       const { commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
@@ -733,7 +898,10 @@ describe("AgenticCommerceUpgradeable", async () => {
         "",
         noopHookAddr,
       ]);
-      await assert.rejects(commerceAsClient.write.setBudget([1n, 0n, "0x"]), /ZeroBudget/);
+      await assert.rejects(
+        commerceAsClient.write.setBudget([1n, 0n, "0x"]),
+        /ZeroBudgetSellerOnly/,
+      );
     });
 
     // [I03] JobFunded carries an indexed `provider` topic so providers can

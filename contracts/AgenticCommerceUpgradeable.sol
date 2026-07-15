@@ -154,6 +154,11 @@ contract AgenticCommerceUpgradeable is
     ///         than {MAX_EXPIRY_DURATION} (audit L01).
     error ExpiryTooLong();
     error ZeroBudget();
+    /// @notice Thrown by {setBudget} when a client attempts to set `amount == 0`.
+    ///         Zero price is a seller-side offer: only the bound `provider` may
+    ///         set a zero budget, so a client cannot unilaterally zero out a
+    ///         price the provider expected to be paid for.
+    error ZeroBudgetSellerOnly();
     error BudgetMismatch();
     error ProviderNotSet();
     error FeeTooHigh();
@@ -349,11 +354,15 @@ contract AgenticCommerceUpgradeable is
     /// @notice Set the budget for a job. Per ERC-8183, either `client` or
     ///         `provider` MAY call this. Front-running on {fund} is prevented
     ///         by the `expectedBudget` parameter.
-    /// @dev    `amount == 0` is rejected up front (audit I02). The kernel
-    ///         treats `budget > 0` as an invariant of the `Funded` state, and
-    ///         {fund} would otherwise need to encode that invariant a second
-    ///         time. Rejecting at the source also lets us simplify {fund}
-    ///         to a single `jobHasBudget` check.
+    /// @dev    Seller-side zero price: a non-zero `amount` MAY be set by either
+    ///         the client or the provider, but `amount == 0` MAY only be set by
+    ///         the `provider` (the seller offering the job for free). A client
+    ///         cannot zero out the price unilaterally (reverts
+    ///         {ZeroBudgetSellerOnly}). Because a zero budget requires
+    ///         `msg.sender == job.provider`, it also implies the provider is
+    ///         already bound. `jobHasBudget` is still set so a zero-budget job
+    ///         passes {fund}'s "budget was set" check while `fund` skips the
+    ///         token transfer. See `docs/erc-8183-compliance.md`.
     function setBudget(uint256 jobId, uint256 amount, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
@@ -361,7 +370,7 @@ contract AgenticCommerceUpgradeable is
         if (msg.sender != job.client && msg.sender != job.provider) {
             revert Unauthorized();
         }
-        if (amount == 0) revert ZeroBudget();
+        if (amount == 0 && msg.sender != job.provider) revert ZeroBudgetSellerOnly();
 
         bytes memory hookData = abi.encode(amount, optParams);
         _beforeHook(job.hook, jobId, this.setBudget.selector, hookData);
@@ -378,6 +387,12 @@ contract AgenticCommerceUpgradeable is
     ///         and trusts the post-transfer balance to equal `budget`.
     ///         See {paymentToken} for the token-class requirements that
     ///         make this assumption sound (audit I01).
+    ///
+    ///         Seller-side zero price: when `job.budget == 0` (a free job the
+    ///         provider offered via {setBudget}), the token transfer is skipped
+    ///         entirely. The client still calls {fund} — this is the mutual
+    ///         opt-in that moves the job to `Funded` and keeps hook-based policy
+    ///         gating on the funding path.
     function fund(uint256 jobId, uint256 expectedBudget, bytes calldata optParams) external nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
@@ -390,7 +405,9 @@ contract AgenticCommerceUpgradeable is
 
         _beforeHook(job.hook, jobId, this.fund.selector, optParams);
         job.status = JobStatus.Funded;
-        IERC20(paymentToken).safeTransferFrom(job.client, address(this), job.budget);
+        if (job.budget > 0) {
+            IERC20(paymentToken).safeTransferFrom(job.client, address(this), job.budget);
+        }
         _afterHook(job.hook, jobId, this.fund.selector, optParams);
 
         emit JobFunded(jobId, job.client, job.provider, job.budget);
