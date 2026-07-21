@@ -21,16 +21,20 @@ import {
   createFundedSubmittedJob,
 } from "./helpers.js";
 
-describe("EvaluatorRouterUpgradeable", async () => {
-  const { viem } = await network.connect();
-  const publicClient = await viem.getPublicClient();
+// Top-level await, NOT an async describe: bun's collector does not await an
+// async describe callback, so tests registered after its first `await` are
+// silently dropped when multiple test files load in parallel.
+const { viem } = await network.connect();
+const publicClient = await viem.getPublicClient();
 
-  const [deployerW, clientW, providerW, treasuryW, otherW] = await viem.getWalletClients();
-  const deployer = getAddress(deployerW.account.address);
-  const client = getAddress(clientW.account.address);
-  const provider = getAddress(providerW.account.address);
-  const treasury = getAddress(treasuryW.account.address);
-  const other = getAddress(otherW.account.address);
+const [deployerW, clientW, providerW, treasuryW, otherW] = await viem.getWalletClients();
+const deployer = getAddress(deployerW.account.address);
+const client = getAddress(clientW.account.address);
+const provider = getAddress(providerW.account.address);
+const treasury = getAddress(treasuryW.account.address);
+const other = getAddress(otherW.account.address);
+
+describe("EvaluatorRouterUpgradeable", () => {
 
   async function setup() {
     return deployStack(viem, { owner: deployer, treasury });

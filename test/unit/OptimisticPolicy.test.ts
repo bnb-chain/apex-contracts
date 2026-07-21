@@ -13,17 +13,21 @@ import {
   createFundedSubmittedJob,
 } from "./helpers.js";
 
-describe("OptimisticPolicy", async () => {
-  const { viem } = await network.connect();
-  const publicClient = await viem.getPublicClient();
-  const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W, voter3W] =
-    await viem.getWalletClients();
-  const deployer = getAddress(deployerW.account.address);
-  const provider = getAddress(providerW.account.address);
-  const treasury = getAddress(treasuryW.account.address);
-  const voter1 = getAddress(voter1W.account.address);
-  const voter2 = getAddress(voter2W.account.address);
-  const voter3 = getAddress(voter3W.account.address);
+// Top-level await, NOT an async describe: bun's collector does not await an
+// async describe callback, so tests registered after its first `await` are
+// silently dropped when multiple test files load in parallel.
+const { viem } = await network.connect();
+const publicClient = await viem.getPublicClient();
+const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W, voter3W] =
+  await viem.getWalletClients();
+const deployer = getAddress(deployerW.account.address);
+const provider = getAddress(providerW.account.address);
+const treasury = getAddress(treasuryW.account.address);
+const voter1 = getAddress(voter1W.account.address);
+const voter2 = getAddress(voter2W.account.address);
+const voter3 = getAddress(voter3W.account.address);
+
+describe("OptimisticPolicy", () => {
 
   async function setup(initialQuorum = 2) {
     return deployStack(viem, {
@@ -114,9 +118,17 @@ describe("OptimisticPolicy", async () => {
   describe("onSubmitted", () => {
     it("only router can call", async () => {
       const { policy } = await setup();
+      // The policy reverts NotRouter() as intended, but EDR's estimateGas
+      // error path reports this one as a raw selector instead of a decoded
+      // name: "unrecognized custom error (return data: 0x91655201)", where
+      // 0x91655201 == keccak256("NotRouter()")[:4]. Accept either form.
+      // (This assertion always failed and was invisible before the per-file
+      // runner: the multi-file `bun test` run never registered this file's
+      // tests.)
+      const notRouterSelector = keccak256(toBytes("NotRouter()")).slice(0, 10);
       await assert.rejects(
         policy.write.onSubmitted([1n, keccak256(toBytes("x")), "0x"]),
-        /NotRouter/,
+        new RegExp(`NotRouter|${notRouterSelector}`),
       );
     });
 
