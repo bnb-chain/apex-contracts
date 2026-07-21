@@ -620,10 +620,10 @@ describe("AgenticCommerceUpgradeable", async () => {
   });
 
   // ==================================================================
-  // Seller-side zero price
+  // Zero price
   // ==================================================================
 
-  describe("seller-side zero price", () => {
+  describe("zero price", () => {
     it("provider may set budget == 0 (jobHasBudget flips true)", async () => {
       const { commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
@@ -642,7 +642,7 @@ describe("AgenticCommerceUpgradeable", async () => {
       assert.equal(await commerce.read.jobHasBudget([1n]), true);
     });
 
-    it("client cannot set budget == 0", async () => {
+    it("client can set budget == 0", async () => {
       const { commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
       await commerceAsClient.write.createJob([
@@ -652,16 +652,18 @@ describe("AgenticCommerceUpgradeable", async () => {
         "",
         noopHookAddr,
       ]);
-      await assert.rejects(
-        commerceAsClient.write.setBudget([1n, 0n, "0x"]),
-        /ZeroBudgetSellerOnly/,
-      );
+      await commerceAsClient.write.setBudget([1n, 0n, "0x"]);
+
+      const job = await commerce.read.getJob([1n]);
+      assert.equal(job.budget, 0n);
+      assert.equal(await commerce.read.jobHasBudget([1n]), true);
     });
 
-    it("budget == 0 cannot be set before a provider is bound", async () => {
+    it("zero-budget job still requires a bound provider to fund", async () => {
       const { commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
-      // Provider unset at creation → nobody satisfies `msg.sender == provider`.
+      // Provider unset at creation: setBudget(0) is fine (client is a valid
+      // caller), but fund keeps the ProviderNotSet gate.
       await commerceAsClient.write.createJob([
         zeroAddress,
         evaluator,
@@ -669,9 +671,10 @@ describe("AgenticCommerceUpgradeable", async () => {
         "",
         noopHookAddr,
       ]);
+      await commerceAsClient.write.setBudget([1n, 0n, "0x"]);
       await assert.rejects(
-        commerceAsClient.write.setBudget([1n, 0n, "0x"]),
-        /ZeroBudgetSellerOnly/,
+        commerceAsClient.write.fund([1n, 0n, "0x"]),
+        /ProviderNotSet/,
       );
     });
 
@@ -885,23 +888,32 @@ describe("AgenticCommerceUpgradeable", async () => {
       );
     });
 
-    // [I02] setBudget(0) used to be rejected outright. Seller-side zero price
-    //       now permits a *provider* to set amount == 0, but a *client* still
-    //       cannot zero out the price unilaterally (ZeroBudgetSellerOnly).
-    it("[I02] setBudget rejects a client-set amount == 0 with ZeroBudgetSellerOnly", async () => {
+    // [I02] setBudget(0) used to be rejected outright so `Funded ⇒ budget > 0`
+    //       held as a kernel invariant. Zero price deliberately relaxes it for
+    //       BOTH parties (compliance doc Delta 4): every transfer site guards
+    //       `> 0`, and off-chain the provider verifies the funded budget
+    //       against its signed quote before working. What survives of I02 is
+    //       "no fund without an explicit setBudget" — jobHasBudget, not the
+    //       amount, is the gate (asserted in the fund suite).
+    it("[I02] setBudget(0) is symmetric: client and provider may both set it", async () => {
       const { commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
-      await commerceAsClient.write.createJob([
-        provider,
-        evaluator,
-        await futureTs(3600),
-        "",
-        noopHookAddr,
-      ]);
-      await assert.rejects(
-        commerceAsClient.write.setBudget([1n, 0n, "0x"]),
-        /ZeroBudgetSellerOnly/,
-      );
+      for (let i = 0; i < 2; i++) {
+        await commerceAsClient.write.createJob([
+          provider,
+          evaluator,
+          await futureTs(3600),
+          "",
+          noopHookAddr,
+        ]);
+      }
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsClient.write.setBudget([1n, 0n, "0x"]);
+      await commerceAsProvider.write.setBudget([2n, 0n, "0x"]);
+      assert.equal((await commerce.read.getJob([1n])).budget, 0n);
+      assert.equal((await commerce.read.getJob([2n])).budget, 0n);
+      assert.equal(await commerce.read.jobHasBudget([1n]), true);
+      assert.equal(await commerce.read.jobHasBudget([2n]), true);
     });
 
     // [I03] JobFunded carries an indexed `provider` topic so providers can

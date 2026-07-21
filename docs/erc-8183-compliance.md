@@ -14,13 +14,16 @@ ERC-8183 draft. It is refreshed per the "ERC-8183 Spec-Update Protocol" in
 ## Summary
 
 APEX v1's kernel (`AgenticCommerceUpgradeable`) satisfies **every
-normative `MUST` and `SHOULD` clause** in ERC-8183 (2026-02-25 Draft),
-including the full 6-state machine, all eight core functions, the
+normative `MUST` and `SHOULD` clause** in ERC-8183 (2026-02-25 Draft)
+**except one**: `fund`'s "SHALL revert if … budget is zero", which is
+deliberately relaxed to support zero-price (free) jobs — see Delta 4.
+The rest holds: the full 6-state machine, all eight core functions, the
 `optParams`-forwarding hook data encoding, the `claimRefund` safety
-carve-out, ERC-165 hook checks, and a gas-bounded hook dispatch. Three
-intentional, non-blocking deltas are tracked below; none of them violate
-a `MUST`. The Router / Policy layer sits on top of the kernel and is
-deliberately non-normative (the ERC does not specify evaluators).
+carve-out, ERC-165 hook checks, and a gas-bounded hook dispatch. Four
+intentional deltas are tracked below; Deltas 1–3 do not violate a
+`MUST`, Delta 4 does and says so explicitly. The Router / Policy layer
+sits on top of the kernel and is deliberately non-normative (the ERC
+does not specify evaluators).
 
 The latest revision (2026-04-28) lands the upgrade-audit fixes: the
 kernel now upper-bounds `expiredAt` (`MAX_EXPIRY_DURATION`), guards
@@ -54,8 +57,8 @@ use `file:line` against the repository as of `Last reviewed` above.
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------ |
 | `createJob(provider, evaluator, expiredAt, description, hook)`, provider MAY be zero, evaluator MUST be nonzero, `expiredAt` MUST be in the future | `contracts/AgenticCommerceUpgradeable.sol:296` (`createJob`)   | ✅     |
 | `setProvider(jobId, provider, optParams?)` — client-only, Open-only, provider MUST be currently zero                                               | `contracts/AgenticCommerceUpgradeable.sol:334` (`setProvider`) | ✅     |
-| `setBudget(jobId, amount, optParams?)` — client OR provider for `amount > 0`; **provider-only for `amount == 0`** (seller-side zero price, `ZeroBudgetSellerOnly`)   | `contracts/AgenticCommerceUpgradeable.sol:366` (`setBudget`)   | ✅     |
-| `fund(jobId, expectedBudget, optParams?)` — client-only, provider MUST be set, `budget == expectedBudget` front-running guard; transfers escrow when `budget > 0`, no-op transfer for a zero-price job | `contracts/AgenticCommerceUpgradeable.sol:396` (`fund`)        | ✅     |
+| `setBudget(jobId, amount, optParams?)` — client OR provider                                                                                        | `contracts/AgenticCommerceUpgradeable.sol:366` (`setBudget`)   | ✅     |
+| `fund(jobId, expectedBudget, optParams?)` — client-only, provider MUST be set, `budget == expectedBudget` front-running guard, **nonzero budget** (spec: "SHALL revert if … budget is zero") | `contracts/AgenticCommerceUpgradeable.sol:396` (`fund`)        | ⚠️ Delta 4 |
 | `submit(jobId, deliverable, optParams?)` — provider-only, Funded → Submitted, `block.timestamp < expiredAt`, persists `deliverable` to storage     | `contracts/AgenticCommerceUpgradeable.sol:423` (`submit`)      | ✅     |
 | `complete(jobId, reason, optParams?)` — evaluator-only, Submitted → Completed                                                                      | `contracts/AgenticCommerceUpgradeable.sol:446` (`complete`)    | ✅     |
 | `reject(jobId, reason, optParams?)` — client when Open, evaluator when Funded/Submitted                                                            | `contracts/AgenticCommerceUpgradeable.sol:481` (`reject`)      | ✅     |
@@ -127,9 +130,11 @@ nine are emitted by the kernel:
 
 ## Non-blocking Deltas
 
-These are intentional differences from the exact spec text. None of them
-violate a `MUST`; each is either a `SHOULD` addition, a reference-impl-only
-feature, or an explicitly-deferred optional extension.
+These are intentional differences from the exact spec text. Deltas 1–3 do
+not violate a `MUST`; each is either a `SHOULD` addition, a
+reference-impl-only feature, or an explicitly-deferred optional extension.
+Delta 4 is the one exception: it relaxes a normative `SHALL` on `fund` to
+support zero-price jobs, and is disclosed as such.
 
 1. **ABI deviations that follow the ERC reference implementation rather
    than its normative text.** The spec document contradicts itself in
@@ -197,6 +202,26 @@ feature, or an explicitly-deferred optional extension.
   If introduced, it requires a v2 kernel with `ERC2771Context` and a
   storage-layout audit.
 
+4. **Zero-price jobs (relaxes a normative `SHALL`).** The spec's `fund`
+   clause reads "SHALL revert if … budget is zero"; our kernel instead
+   lets a zero-budget job reach `Funded`, skipping the escrow transfer.
+   `setBudget(jobId, 0, …)` MAY be called by either the client or the
+   provider (the spec puts no amount constraint on `setBudget` itself),
+   and `fund` keeps every other gate: `jobHasBudget` (an explicit
+   `setBudget` MUST precede `fund` — reverts `ZeroBudget` otherwise),
+   `expectedBudget` front-running protection, `ProviderNotSet`, expiry.
+   Safety rests on three facts: every kernel transfer site
+   (`fund`/`complete`/`reject`/`claimRefund`) guards `amount > 0`, so no
+   zero-value token calls occur; the Router / Policy layer never reads
+   `job.budget`; and `job.budget` is immutable once the job leaves
+   `Open`, so a provider always sees the final funded amount when it
+   verifies the job against its signed quote off-chain before working —
+   a client that zeroes a price unilaterally only buys itself a
+   permanent refusal of service. Sellers opt in by quoting price 0.
+   We intend to propose zero-price semantics upstream to the ERC-8183
+   Draft; if the ERC adopts a different mechanism this delta will be
+   revisited.
+
 ### Router-layer deviation (disclosed separately)
 
 The **Router** layer deviates from one spec `SHOULD`: "Hooks SHOULD NOT be
@@ -210,6 +235,17 @@ upgrade". The kernel itself still satisfies all `MUST` clauses.
 
 ## Change Log
 
+- **2026-07-21** (PR #12) — Zero-price jobs. `setBudget` accepts
+  `amount == 0` from either the client or the provider (the audit-I02
+  up-front rejection is deliberately relaxed), and `fund` skips the
+  escrow transfer when `job.budget == 0`, letting a free job reach
+  `Funded` as a mutual opt-in. This relaxes `fund`'s normative "SHALL
+  revert if … budget is zero" — recorded as Delta 4 with the full
+  safety argument (all transfer sites guard `> 0`; Router / Policy
+  never read `job.budget`; budget is immutable after `Open`, so
+  providers verify the final funded amount against their signed quote
+  before working). `jobHasBudget` still gates `fund` (`ZeroBudget`).
+  No spec-version bump.
 - **2026-04-28** (PR-4) — Final two informational items closed.
   Kernel: appended `bytes32 deliverable` to the `IACP.Job` struct and
   `submit` now persists the provider's deliverable hash to job storage
