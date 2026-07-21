@@ -28,7 +28,6 @@ const voter2 = getAddress(voter2W.account.address);
 const voter3 = getAddress(voter3W.account.address);
 
 describe("OptimisticPolicy", () => {
-
   async function setup(initialQuorum = 2) {
     return deployStack(viem, {
       owner: deployer,

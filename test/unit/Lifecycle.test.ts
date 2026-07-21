@@ -16,8 +16,7 @@ import {
 // async describe callback, so tests registered after its first `await` are
 // silently dropped when multiple test files load in parallel.
 const { viem } = await network.connect();
-const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W] =
-  await viem.getWalletClients();
+const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W] = await viem.getWalletClients();
 const deployer = getAddress(deployerW.account.address);
 const client = getAddress(clientW.account.address);
 const provider = getAddress(providerW.account.address);
@@ -26,7 +25,6 @@ const voter1 = getAddress(voter1W.account.address);
 const voter2 = getAddress(voter2W.account.address);
 
 describe("End-to-end lifecycle", () => {
-
   async function setup(platformFeeBP: bigint = 0n) {
     const ctx = await deployStack(viem, {
       owner: deployer,

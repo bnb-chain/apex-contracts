@@ -53,22 +53,22 @@ use `file:line` against the repository as of `Last reviewed` above.
 
 ### Core functions
 
-| Spec function                                                                                                                                      | Our implementation                                             | Status |
-| -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------ |
-| `createJob(provider, evaluator, expiredAt, description, hook)`, provider MAY be zero, evaluator MUST be nonzero, `expiredAt` MUST be in the future | `contracts/AgenticCommerceUpgradeable.sol:296` (`createJob`)   | ✅     |
-| `setProvider(jobId, provider, optParams?)` — client-only, Open-only, provider MUST be currently zero                                               | `contracts/AgenticCommerceUpgradeable.sol:334` (`setProvider`) | ✅     |
-| `setBudget(jobId, amount, optParams?)` — client OR provider                                                                                        | `contracts/AgenticCommerceUpgradeable.sol:366` (`setBudget`)   | ✅     |
-| `fund(jobId, expectedBudget, optParams?)` — client-only, provider MUST be set, `budget == expectedBudget` front-running guard, **nonzero budget** (spec: "SHALL revert if … budget is zero") | `contracts/AgenticCommerceUpgradeable.sol:396` (`fund`)        | ⚠️ Delta 4 |
-| `submit(jobId, deliverable, optParams?)` — provider-only, Funded → Submitted, `block.timestamp < expiredAt`, persists `deliverable` to storage     | `contracts/AgenticCommerceUpgradeable.sol:423` (`submit`)      | ✅     |
-| `complete(jobId, reason, optParams?)` — evaluator-only, Submitted → Completed                                                                      | `contracts/AgenticCommerceUpgradeable.sol:446` (`complete`)    | ✅     |
-| `reject(jobId, reason, optParams?)` — client when Open, evaluator when Funded/Submitted                                                            | `contracts/AgenticCommerceUpgradeable.sol:481` (`reject`)      | ✅     |
-| `claimRefund(jobId)` — anyone after `expiredAt`, Funded/Submitted only                                                                             | `contracts/AgenticCommerceUpgradeable.sol:515` (`claimRefund`) | ✅     |
+| Spec function                                                                                                                                                                                | Our implementation                                             | Status     |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ---------- |
+| `createJob(provider, evaluator, expiredAt, description, hook)`, provider MAY be zero, evaluator MUST be nonzero, `expiredAt` MUST be in the future                                           | `contracts/AgenticCommerceUpgradeable.sol:291` (`createJob`)   | ✅         |
+| `setProvider(jobId, provider, optParams?)` — client-only, Open-only, provider MUST be currently zero                                                                                         | `contracts/AgenticCommerceUpgradeable.sol:329` (`setProvider`) | ✅         |
+| `setBudget(jobId, amount, optParams?)` — client OR provider                                                                                                                                  | `contracts/AgenticCommerceUpgradeable.sol:361` (`setBudget`)   | ✅         |
+| `fund(jobId, expectedBudget, optParams?)` — client-only, provider MUST be set, `budget == expectedBudget` front-running guard, **nonzero budget** (spec: "SHALL revert if … budget is zero") | `contracts/AgenticCommerceUpgradeable.sol:390` (`fund`)        | ⚠️ Delta 4 |
+| `submit(jobId, deliverable, optParams?)` — provider-only, Funded → Submitted, `block.timestamp < expiredAt`, persists `deliverable` to storage                                               | `contracts/AgenticCommerceUpgradeable.sol:417` (`submit`)      | ✅         |
+| `complete(jobId, reason, optParams?)` — evaluator-only, Submitted → Completed                                                                                                                | `contracts/AgenticCommerceUpgradeable.sol:440` (`complete`)    | ✅         |
+| `reject(jobId, reason, optParams?)` — client when Open, evaluator when Funded/Submitted                                                                                                      | `contracts/AgenticCommerceUpgradeable.sol:475` (`reject`)      | ✅         |
+| `claimRefund(jobId)` — anyone after `expiredAt`, Funded/Submitted only                                                                                                                       | `contracts/AgenticCommerceUpgradeable.sol:509` (`claimRefund`) | ✅         |
 
 ### Fees
 
 | Clause                                                                                                            | Our implementation                                                                                        | Status |
 | ----------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------ |
-| Optional platform fee (basis points) on completion only, capped at `MAX_PLATFORM_FEE_BP = 1_000` (10%, audit I07) | `setPlatformFee` at `contracts/AgenticCommerceUpgradeable.sol:223`; fee applied in `complete` at line 461 | ✅     |
+| Optional platform fee (basis points) on completion only, capped at `MAX_PLATFORM_FEE_BP = 1_000` (10%, audit I07) | `setPlatformFee` at `contracts/AgenticCommerceUpgradeable.sol:218`; fee applied in `complete` at line 455 | ✅     |
 | Fee NOT deducted on refund                                                                                        | Refund paths (`reject`, `claimRefund`) transfer full `job.budget`                                         | ✅     |
 
 ### Hooks
@@ -76,11 +76,11 @@ use `file:line` against the repository as of `Last reviewed` above.
 | Clause                                                   | Our implementation                                                                                                                                                                                | Status |
 | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
 | `IACPHook` interface (two functions, IERC165)            | `contracts/IACPHook.sol`                                                                                                                                                                          | ✅     |
-| Hook MUST be ERC-165-verified at creation                | `ERC165Checker.supportsInterface` in `createJob` (`AgenticCommerceUpgradeable.sol:307`)                                                                                                           | ✅     |
-| `job.hook == address(0)` skips hook calls                | Early return in `_beforeHook` / `_afterHook` (`AgenticCommerceUpgradeable.sol:243-266`); unreachable for jobs created post-2026-04-28 because `createJob` now reverts on a zero hook (audit L05). | ✅     |
-| Before hooks MAY revert to block an action               | Hook reverts bubble verbatim via assembly in `_bubble` (`:268`)                                                                                                                                   | ✅     |
+| Hook MUST be ERC-165-verified at creation                | `ERC165Checker.supportsInterface` in `createJob` (`AgenticCommerceUpgradeable.sol:302`)                                                                                                           | ✅     |
+| `job.hook == address(0)` skips hook calls                | Early return in `_beforeHook` / `_afterHook` (`AgenticCommerceUpgradeable.sol:238-261`); unreachable for jobs created post-2026-04-28 because `createJob` now reverts on a zero hook (audit L05). | ✅     |
+| Before hooks MAY revert to block an action               | Hook reverts bubble verbatim via assembly in `_bubble` (`:263`)                                                                                                                                   | ✅     |
 | After hooks MAY perform side effects / revert atomically | Same bubble semantics; after-hook reverts undo the core state change                                                                                                                              | ✅     |
-| `claimRefund` MUST NOT be hookable                       | `claimRefund` (`:515`) bypasses `_beforeHook` / `_afterHook` entirely                                                                                                                             | ✅     |
+| `claimRefund` MUST NOT be hookable                       | `claimRefund` (`:509`) bypasses `_beforeHook` / `_afterHook` entirely                                                                                                                             | ✅     |
 | Hook gas limit (SHOULD)                                  | `HOOK_GAS_LIMIT = 1_000_000` applied via `.call{gas: ...}` (`:34, :243, :255`)                                                                                                                    | ✅     |
 
 ### Hook data encoding
@@ -90,12 +90,12 @@ Spec table (§Hooks / Data encoding) → code location in
 
 | Selector      | Spec encoding                                      | Code anchor                                 | Status |
 | ------------- | -------------------------------------------------- | ------------------------------------------- | ------ |
-| `setProvider` | `abi.encode(address provider, bytes optParams)`    | `:346` `abi.encode(provider_, optParams)`   | ✅     |
-| `setBudget`   | `abi.encode(uint256 amount, bytes optParams)`      | `:375` `abi.encode(amount, optParams)`      | ✅     |
-| `fund`        | `optParams` (raw bytes)                            | `:406` raw `optParams` passed through       | ✅     |
-| `submit`      | `abi.encode(bytes32 deliverable, bytes optParams)` | `:430` `abi.encode(deliverable, optParams)` | ✅     |
-| `complete`    | `abi.encode(bytes32 reason, bytes optParams)`      | `:456` `abi.encode(reason, optParams)`      | ✅     |
-| `reject`      | `abi.encode(bytes32 reason, bytes optParams)`      | `:498` `abi.encode(reason, optParams)`      | ✅     |
+| `setProvider` | `abi.encode(address provider, bytes optParams)`    | `:341` `abi.encode(provider_, optParams)`   | ✅     |
+| `setBudget`   | `abi.encode(uint256 amount, bytes optParams)`      | `:369` `abi.encode(amount, optParams)`      | ✅     |
+| `fund`        | `optParams` (raw bytes)                            | `:400` raw `optParams` passed through       | ✅     |
+| `submit`      | `abi.encode(bytes32 deliverable, bytes optParams)` | `:424` `abi.encode(deliverable, optParams)` | ✅     |
+| `complete`    | `abi.encode(bytes32 reason, bytes optParams)`      | `:450` `abi.encode(reason, optParams)`      | ✅     |
+| `reject`      | `abi.encode(bytes32 reason, bytes optParams)`      | `:492` `abi.encode(reason, optParams)`      | ✅     |
 
 ### Events
 
@@ -143,14 +143,14 @@ support zero-price jobs, and is disclosed as such.
    except where doing so would silently drop information (`setProvider`
    and `fund`), in which case we follow the normative text:
 
-- `**JobCreated` adds a non-indexed `hook` field\*\* (`:86-93`). Our
+- `**JobCreated` adds a non-indexed `hook` field\*\* (`:112-119`). Our
   topic0 is
   `keccak256("JobCreated(uint256,address,address,address,uint256,address)")`.
   Indexers wired to the normative 5-parameter signature will NOT
   receive this event; ref-impl-ABI indexers WILL. Removing the field
   on a future UUPS upgrade is an ABI-only, storage-safe change if
   strict normative compatibility is later required.
-- `**JobFunded` adds an indexed `provider` topic\*\* (`:104`). Topic0
+- `**JobFunded` adds an indexed `provider` topic\*\* (`:130`). Topic0
   becomes `keccak256("JobFunded(uint256,address,address,uint256)")`,
   which is a superset of the normative
   `JobFunded(uint256,address,uint256)` shape. The extra topic lets a
@@ -158,7 +158,7 @@ support zero-price jobs, and is disclosed as such.
   it, without joining against `JobCreated` (audit I03). Indexers
   wired to the normative 3-parameter signature will NOT receive
   this event; ref-impl-ABI indexers (which carry `provider`) WILL.
-- `**createJob` invokes `_afterHook` only\*\* (`:296`). Spec's
+- `**createJob` invokes `_afterHook` only\*\* (`:291`). Spec's
   Hookable table omits `createJob`; the reference implementation
   invokes a post-action hook here. We follow the reference impl
   but **deliberately omit `_beforeHook`** (audit I09): a

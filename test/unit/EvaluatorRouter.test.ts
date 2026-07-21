@@ -35,7 +35,6 @@ const treasury = getAddress(treasuryW.account.address);
 const other = getAddress(otherW.account.address);
 
 describe("EvaluatorRouterUpgradeable", () => {
-
   async function setup() {
     return deployStack(viem, { owner: deployer, treasury });
   }

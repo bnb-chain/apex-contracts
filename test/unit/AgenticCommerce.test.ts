@@ -36,7 +36,6 @@ const noopHook = await deployNoopHook(viem);
 const noopHookAddr = noopHook.address as `0x${string}`;
 
 describe("AgenticCommerceUpgradeable", () => {
-
   async function setup() {
     const token = await deployMockToken(viem);
     const { proxy, impl } = await deployCommerce(viem, {
@@ -676,10 +675,7 @@ describe("AgenticCommerceUpgradeable", () => {
         noopHookAddr,
       ]);
       await commerceAsClient.write.setBudget([1n, 0n, "0x"]);
-      await assert.rejects(
-        commerceAsClient.write.fund([1n, 0n, "0x"]),
-        /ProviderNotSet/,
-      );
+      await assert.rejects(commerceAsClient.write.fund([1n, 0n, "0x"]), /ProviderNotSet/);
     });
 
     it("fund on a zero-budget job transitions to Funded without any transfer", async () => {

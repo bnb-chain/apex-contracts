@@ -38,7 +38,6 @@ const evaluator = getAddress(evaluatorW.account.address);
 const treasury = getAddress(treasuryW.account.address);
 
 describe("UUPS upgrades", () => {
-
   describe("AgenticCommerceUpgradeable", () => {
     it("upgradeToAndCall preserves proxy address and storage", async () => {
       const token = await deployMockToken(viem);
