@@ -21,7 +21,8 @@ export interface Logger {
 }
 
 function explorerPrefix(networkName: string): string | undefined {
-  if (networkName === "bscTestnet") return "https://testnet.bscscan.com/tx/";
+  if (networkName === "bscTestnet" || networkName === "bscTestnetQa")
+    return "https://testnet.bscscan.com/tx/";
   if (networkName === "bsc") return "https://bscscan.com/tx/";
   return undefined;
 }

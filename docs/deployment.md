@@ -187,3 +187,42 @@ After the multisig has accepted ownership, it MUST:
 2. Whitelist any additional policies via
    `router.setPolicyWhitelist(addr, true)` (the deployer-run policy is
    whitelisted automatically before ownership handoff).
+
+## 7 · QA environment (`bscTestnetQa`)
+
+`bscTestnetQa` is a long-lived QA deployment that lives on the **same chain**
+as `bscTestnet` (BSC Testnet, chainId 97, same RPC). The network **name** is
+the primary key everywhere — hardhat `networks`, npm scripts, and the
+`ADDRESSES` table — and chainId is just a field, so both environments coexist
+on one chain without colliding (same approach as hardhat-deploy's
+`deployments/<name>/` or Ignition's `--deployment-id`).
+
+Differences from `bscTestnet`:
+
+- **Deployer key:** `BSC_TESTNET_QA_PRIVATE_KEY` in `.env` — a dedicated
+  wallet, never the `bscTestnet` deployer, so the two environments don't
+  share nonces or funds. Fund it with tBNB before the first deploy.
+- **Addresses:** tracked under `ADDRESSES["bscTestnetQa"]` in
+  [`scripts/addresses.ts`](../scripts/addresses.ts). This repo entry is the
+  **source of truth** for QA addresses — `bnbagent-sdk` does not hardcode
+  them; consumers (SDK / studio) receive them via runtime injection.
+
+The workflow is the standard one from §1–§5, with the `-qa` scripts:
+
+```bash
+# first deploy: paymentToken is blank in ADDRESSES["bscTestnetQa"], so this
+# does a full-stack rotation (fresh mock token + Commerce + Router + Policy).
+# To reuse an existing token instead, pre-fill paymentToken / treasury first.
+bun run deploy:testnet-qa
+
+# paste the printed address block back into ADDRESSES["bscTestnetQa"] and commit
+
+bun run verify:testnet-qa
+
+# optional: E2E against the QA stack (owner key = BSC_TESTNET_QA_PRIVATE_KEY)
+bun run e2e:testnet-qa
+```
+
+Subsequent runs of `bun run deploy:testnet-qa` follow the same cascade as any
+other network: filled proxies get impl upgrades, blank fields get fresh
+deploys, and the policy is always rotated.

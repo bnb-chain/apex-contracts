@@ -93,6 +93,18 @@ const config: HardhatUserConfig = {
       url: process.env.BSC_TESTNET_RPC_URL || "https://data-seed-prebsc-2-s3.binance.org:8545",
       accounts: process.env.BSC_TESTNET_PRIVATE_KEY ? [process.env.BSC_TESTNET_PRIVATE_KEY] : [],
     },
+    // Long-lived QA environment on the same chain (chainId 97). Network name
+    // is the primary key everywhere (ADDRESSES, deploy/verify scripts);
+    // chainId is just a field. Dedicated deployer key so QA never shares
+    // nonces/funds with the bscTestnet deployer.
+    bscTestnetQa: {
+      type: "http",
+      chainType: "l1",
+      url: process.env.BSC_TESTNET_RPC_URL || "https://data-seed-prebsc-2-s3.binance.org:8545",
+      accounts: process.env.BSC_TESTNET_QA_PRIVATE_KEY
+        ? [process.env.BSC_TESTNET_QA_PRIVATE_KEY]
+        : [],
+    },
     bsc: {
       type: "http",
       chainType: "l1",

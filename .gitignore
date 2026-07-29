@@ -47,3 +47,5 @@ _tmp/
 
 .env.*
 !.env.example
+
+.vscode_hardhat_config_*.ts

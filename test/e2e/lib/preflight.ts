@@ -5,7 +5,7 @@
 
 import { formatEther, formatUnits, getAddress, parseUnits } from "viem";
 
-import type { E2EConfig } from "../config.js";
+import { ownerKeyEnvVar, type E2EConfig } from "../config.js";
 import type { E2EWallets } from "./wallets.js";
 import type { Logger } from "./logging.js";
 
@@ -63,17 +63,18 @@ export async function testnetPreflight(
   log.info(`chain block: ${blockNumber}`);
 
   // 2. Router owner must match the key the runner uses to sign admin txs.
+  const ownerKeyVar = ownerKeyEnvVar(cfg.networkName);
   const currentOwner = getAddress((await router.read.owner()) as `0x${string}`);
   const ownerAddr = getAddress(wallets.owner.account!.address);
   if (currentOwner !== ownerAddr) {
     throw new PreflightError(
       `Router owner mismatch. Router.owner()=${currentOwner}, ` +
-        `BSC_TESTNET_PRIVATE_KEY resolves to=${ownerAddr}. ` +
+        `${ownerKeyVar} resolves to=${ownerAddr}. ` +
         `Either transfer router ownership back to the deployer key, or ` +
-        `point BSC_TESTNET_PRIVATE_KEY at the current owner.`,
+        `point ${ownerKeyVar} at the current owner.`,
     );
   }
-  log.ok(`router.owner == BSC_TESTNET_PRIVATE_KEY (${ownerAddr})`);
+  log.ok(`router.owner == ${ownerKeyVar} (${ownerAddr})`);
 
   // 3. Payment token + decimals.
   const paymentToken = getAddress((await commerce.read.paymentToken()) as `0x${string}`);

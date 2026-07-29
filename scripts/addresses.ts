@@ -65,6 +65,12 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
     routerImpl: "0x9f42b71ae5990e6f5bb58a935fffe32b29a5374a",
     policy: "0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6",
   },
+  // Long-lived QA environment — same chain as bscTestnet (chainId 97), keyed
+  // by network name. Blank paymentToken → first `bun run deploy:testnet-qa`
+  // does a full-stack rotation (fresh mock token + Commerce + Router +
+  // Policy); paste the printed block back here. Pre-fill paymentToken /
+  // treasury instead to reuse an existing token.
+  bscTestnetQa: {},
   bsc: {
     paymentToken: "0xcE24439F2D9C6a2289F741120FE202248B666666", // e.g. U on BSC Mainnet
     treasury: "0x000000000000000000000000000000000000dEaD",

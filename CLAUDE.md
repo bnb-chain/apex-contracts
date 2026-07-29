@@ -47,7 +47,7 @@ test/
 docs/
   design.md                        # Canonical design document
   erc-8183-compliance.md           # ERC-8183 compliance matrix + change log
-hardhat.config.ts                  # Networks (bscTestnet, bsc, bscTestnetFork, localhost)
+hardhat.config.ts                  # Networks (bscTestnet, bscTestnetQa, bsc, bscTestnetFork, localhost)
 ```
 
 **Key architectural constraints (never violate without an upgrade audit):**
