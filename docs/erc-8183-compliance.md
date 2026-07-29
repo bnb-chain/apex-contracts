@@ -50,16 +50,16 @@ use `file:line` against the repository as of `Last reviewed` above.
 
 ### Core functions
 
-| Spec function                                                                                                                                      | Our implementation                                             | Status |
-| -------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- | ------ |
-| `createJob(provider, evaluator, expiredAt, description, hook)`, provider MAY be zero, evaluator MUST be nonzero, `expiredAt` MUST be in the future | `contracts/AgenticCommerceUpgradeable.sol:296` (`createJob`)   | ✅     |
-| `setProvider(jobId, provider, optParams?)` — client-only, Open-only, provider MUST be currently zero                                               | `contracts/AgenticCommerceUpgradeable.sol:334` (`setProvider`) | ✅     |
-| `setBudget(jobId, amount, optParams?)` — client OR provider for `amount > 0`; **provider-only for `amount == 0`** (seller-side zero price, `ZeroBudgetSellerOnly`)   | `contracts/AgenticCommerceUpgradeable.sol:366` (`setBudget`)   | ✅     |
+| Spec function                                                                                                                                                                                          | Our implementation                                             | Status |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- | ------ |
+| `createJob(provider, evaluator, expiredAt, description, hook)`, provider MAY be zero, evaluator MUST be nonzero, `expiredAt` MUST be in the future                                                     | `contracts/AgenticCommerceUpgradeable.sol:296` (`createJob`)   | ✅     |
+| `setProvider(jobId, provider, optParams?)` — client-only, Open-only, provider MUST be currently zero                                                                                                   | `contracts/AgenticCommerceUpgradeable.sol:334` (`setProvider`) | ✅     |
+| `setBudget(jobId, amount, optParams?)` — client OR provider for `amount > 0`; **provider-only for `amount == 0`** (seller-side zero price, `ZeroBudgetSellerOnly`)                                     | `contracts/AgenticCommerceUpgradeable.sol:366` (`setBudget`)   | ✅     |
 | `fund(jobId, expectedBudget, optParams?)` — client-only, provider MUST be set, `budget == expectedBudget` front-running guard; transfers escrow when `budget > 0`, no-op transfer for a zero-price job | `contracts/AgenticCommerceUpgradeable.sol:396` (`fund`)        | ✅     |
-| `submit(jobId, deliverable, optParams?)` — provider-only, Funded → Submitted, `block.timestamp < expiredAt`, persists `deliverable` to storage     | `contracts/AgenticCommerceUpgradeable.sol:423` (`submit`)      | ✅     |
-| `complete(jobId, reason, optParams?)` — evaluator-only, Submitted → Completed                                                                      | `contracts/AgenticCommerceUpgradeable.sol:446` (`complete`)    | ✅     |
-| `reject(jobId, reason, optParams?)` — client when Open, evaluator when Funded/Submitted                                                            | `contracts/AgenticCommerceUpgradeable.sol:481` (`reject`)      | ✅     |
-| `claimRefund(jobId)` — anyone after `expiredAt`, Funded/Submitted only                                                                             | `contracts/AgenticCommerceUpgradeable.sol:515` (`claimRefund`) | ✅     |
+| `submit(jobId, deliverable, optParams?)` — provider-only, Funded → Submitted, `block.timestamp < expiredAt`, persists `deliverable` to storage                                                         | `contracts/AgenticCommerceUpgradeable.sol:423` (`submit`)      | ✅     |
+| `complete(jobId, reason, optParams?)` — evaluator-only, Submitted → Completed                                                                                                                          | `contracts/AgenticCommerceUpgradeable.sol:446` (`complete`)    | ✅     |
+| `reject(jobId, reason, optParams?)` — client when Open, evaluator when Funded/Submitted                                                                                                                | `contracts/AgenticCommerceUpgradeable.sol:481` (`reject`)      | ✅     |
+| `claimRefund(jobId)` — anyone after `expiredAt`, Funded/Submitted only                                                                                                                                 | `contracts/AgenticCommerceUpgradeable.sol:515` (`claimRefund`) | ✅     |
 
 ### Fees
 
