@@ -5,7 +5,7 @@
   "scripts": {
     "compile": "bunx hardhat compile",
     "abis": "bun run compile && bun scripts/export-abi.ts",
-    "test": "bun test test/unit/",
+    "test": "sh scripts/run-unit-tests.sh",
     "e2e:local": "bunx hardhat run test/e2e/runner.ts --network localhost",
     "e2e:testnet": "bunx hardhat run test/e2e/runner.ts --network bscTestnet",
     "e2e:testnet-qa": "bunx hardhat run test/e2e/runner.ts --network bscTestnetQa",
