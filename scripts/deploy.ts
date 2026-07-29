@@ -295,9 +295,11 @@ async function main(): Promise<void> {
   const verifyScript =
     networkName === "bscTestnet"
       ? "verify:testnet"
-      : networkName === "bsc"
-        ? "verify:mainnet"
-        : null;
+      : networkName === "bscTestnetQa"
+        ? "verify:testnet-qa"
+        : networkName === "bsc"
+          ? "verify:mainnet"
+          : null;
   if (verifyScript) {
     console.log(`Next step (after pasting the block above back into addresses.ts):`);
     console.log(`  bun run ${verifyScript}`);
