@@ -75,12 +75,10 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
     paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // e.g. U on BSC Testnet
     treasury: "0x1001b2C085345f388778A975648aA50bcfd0D134",
     commerceProxy: "0xa206c0517b6371c6638cd9e4a42cc9f02a33b0de",
-    // Impl fields below reflect the on-chain ERC-1967 slots as of 2026-08-06;
-    // the proxies were upgraded outside this repo's deploy flow.
-    commerceImpl: "0x2646a94fdf1d7d06fa9a3a4e9ec3e974dee2cb8a",
+    commerceImpl: "0x153783ddbdf5233c591965f04644b1df2d1a7815",
     routerProxy: "0xd7d36d66d2f1b608a0f943f722d27e3744f66f25",
-    routerImpl: "0xaf1add75a77b83c86dd49ca636813d3001cfd6fa",
-    policy: "0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6",
+    routerImpl: "0x40c0254610d92f1eb9c2d7d5d2114bc4c99d935e",
+    policy: "0xd6a4217588f6b1f5657a92a3e94e6422ad771cea",
   },
   bscTestnetQa: {
     paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // same U as bscTestnet
