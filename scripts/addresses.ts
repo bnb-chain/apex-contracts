@@ -12,11 +12,12 @@
  *         Router remain on-chain; clients must drain them via claimRefund.
  *
  *   - paymentToken filled → use that ERC-20 verbatim. Then:
- *       - commerceProxy filled → keep proxy, only deploy new impl + upgradeToAndCall.
+ *       - commerceProxy filled → keep proxy; deploy new impl + upgradeToAndCall
+ *         ONLY if the compiled bytecode differs from the on-chain impl.
  *       - commerceProxy blank  → deploy fresh Commerce AND force-fresh the
  *         Router (otherwise the Router would point at a dead Commerce).
- *       - routerProxy filled AND Commerce was reused → keep proxy, only
- *         deploy new impl + upgradeToAndCall.
+ *       - routerProxy filled AND Commerce was reused → keep proxy; same
+ *         bytecode-diff rule as Commerce.
  *       - routerProxy blank (or forced fresh by the cascade) → deploy fresh
  *         Router pointing at the Commerce above.
  *
@@ -26,9 +27,12 @@
  *                `setPlatformFee`, which this script never calls).
  *                Blank → falls back to the deployer.
  *
- *   - policy: ALWAYS freshly deployed + whitelisted on the Router. The value
- *     stored here is ignored as input; it only informs the "revoke old
- *     policy" reminder printed at the end of each run.
+ *   - policy: reused when its on-chain bytecode matches the compiled artifact
+ *     AND it points at this entry's commerce/router; otherwise a fresh
+ *     OptimisticPolicy is deployed + whitelisted on the Router. Constructor
+ *     params (disputeWindow / initialQuorum) are immutables and invisible to
+ *     the bytecode diff — to rotate params without a code change, blank this
+ *     field to force a redeploy.
  *
  *   - commerceImpl / routerImpl: current UUPS implementation addresses behind
  *     each proxy. Read by `scripts/verify.ts` to Etherscan-verify the impl
@@ -39,7 +43,8 @@
  *
  * Workflow:
  *   1. Optionally pre-fill `paymentToken` + `treasury` for the target
- *      network below; run `bun run deploy:<env>`.
+ *      network below; run `bun run deploy:<env>` (dry run — prints the plan),
+ *      then re-run with `DEPLOY_YES=1` to execute it.
  *   2. Paste the printed block (only the fields that changed in that run)
  *      back into the same entry and commit.
  *   3. Run `bun run verify:<env>` to Etherscan-verify the whole stack.
@@ -55,31 +60,39 @@ export type DeployedAddresses = {
   readonly policy?: `0x${string}`;
 };
 
+const BSC_MAINNET: DeployedAddresses = {
+  paymentToken: "0xcE24439F2D9C6a2289F741120FE202248B666666", // e.g. U on BSC Mainnet
+  treasury: "0x000000000000000000000000000000000000dEaD",
+  commerceProxy: "0xea4daa3100a767e86fded867729ae7446476eba6",
+  commerceImpl: "0xd5f9b570c96b5d67702d508c0bfb8b3b09209787",
+  routerProxy: "0x51895229e12f9876011789b04f8698af06ccd6da",
+  routerImpl: "0xf0cf8f47e5c035f16247ff16e9f367e477ee5007",
+  policy: "0x9c01845705b3078aa2e8cff7520a6376fd766de5",
+};
+
 export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
   bscTestnet: {
     paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // e.g. U on BSC Testnet
     treasury: "0x1001b2C085345f388778A975648aA50bcfd0D134",
     commerceProxy: "0xa206c0517b6371c6638cd9e4a42cc9f02a33b0de",
-    commerceImpl: "0xc0b74dc6b1c95b1452f678741e7907290587d69b",
+    // Impl fields below reflect the on-chain ERC-1967 slots as of 2026-08-06;
+    // the proxies were upgraded outside this repo's deploy flow.
+    commerceImpl: "0x2646a94fdf1d7d06fa9a3a4e9ec3e974dee2cb8a",
     routerProxy: "0xd7d36d66d2f1b608a0f943f722d27e3744f66f25",
-    routerImpl: "0x9f42b71ae5990e6f5bb58a935fffe32b29a5374a",
+    routerImpl: "0xaf1add75a77b83c86dd49ca636813d3001cfd6fa",
     policy: "0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6",
   },
   bscTestnetQa: {
     paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // same U as bscTestnet
     commerceProxy: "0x61d606db08c6acc393fd33e9c07da8f687771b6f",
-    commerceImpl: "0xf96775465546615a00048b0fda41efda51db5fe7",
+    commerceImpl: "0x6d95b205b8a5c0ea15cfa72a2e20cdbea0357362",
     routerProxy: "0x1f31eb0183b64f57dbb1193ad9525dda27fcd02b",
     routerImpl: "0xc1060ce42b2b1162fa0e66ba3ebc241e6b08c410",
     policy: "0x23437ee9c2797ca26e7209a7456c60b39306001c",
   },
-  bsc: {
-    paymentToken: "0xcE24439F2D9C6a2289F741120FE202248B666666", // e.g. U on BSC Mainnet
-    treasury: "0x000000000000000000000000000000000000dEaD",
-    commerceProxy: "0xea4daa3100a767e86fded867729ae7446476eba6",
-    commerceImpl: "0x2788d06576ef83fdbeb00fb848e9fd896fc259e6",
-    routerProxy: "0x51895229e12f9876011789b04f8698af06ccd6da",
-    routerImpl: "0xf0cf8f47e5c035f16247ff16e9f367e477ee5007",
-    policy: "0x9c01845705b3078aa2e8cff7520a6376fd766de5",
-  },
+  bsc: BSC_MAINNET,
+  // In-process fork of BSC mainnet (see hardhat.config.ts) used to rehearse
+  // mainnet upgrades: same registry entry as `bsc`, so a fork run reports
+  // exactly what the real mainnet run will do.
+  bscFork: BSC_MAINNET,
 };

@@ -37,6 +37,15 @@ const config: HardhatUserConfig = {
     },
     56: {
       name: "BSC Mainnet",
+      // Required by edr-simulated forks (bscFork): EDR has no built-in
+      // hardfork schedule for chain 56, and only descriptors whose chainType
+      // matches the fork network's ("l1") are applied. Contracts target
+      // cancun and every fork block is far past its activation, so block 0
+      // is accurate enough.
+      chainType: "l1",
+      hardforkHistory: {
+        cancun: { blockNumber: 0 },
+      },
       blockExplorers: {
         etherscan: {
           url: "https://bscscan.com",
@@ -81,6 +90,13 @@ const config: HardhatUserConfig = {
       chainType: "l1",
       forking: {
         url: process.env.BSC_TESTNET_RPC_URL || "https://data-seed-prebsc-2-s3.binance.org:8545",
+      },
+    },
+    bscFork: {
+      type: "edr-simulated",
+      chainType: "l1",
+      forking: {
+        url: process.env.BSC_RPC_URL || "https://bsc-dataseed.binance.org",
       },
     },
     localhost: {

@@ -84,8 +84,12 @@ bun run deploy:local              # Uses .env; deploys stack to localhost
 bun run fund:local                # Sends ETH + MockERC20 to FUND_RECIPIENT
 
 # Deployment (BSC Testnet) — same script handles first deploy, impl upgrade,
-# and policy rotation (decided per-field from scripts/addresses.ts)
-bun run deploy:testnet            # Uses .env
+# and policy rotation (decided per-field from scripts/addresses.ts + on-chain
+# bytecode diff). Dry-run by default; DEPLOY_YES=1 executes. Owner-gated calls
+# on proxies not owned by the signer (e.g. mainnet multisig) are printed as
+# Safe calldata instead of sent.
+bun run deploy:testnet            # Uses .env (dry run)
+DEPLOY_YES=1 bun run deploy:testnet   # execute
 
 # Verification (manual)
 bunx hardhat verify --network bscTestnet <impl_address>

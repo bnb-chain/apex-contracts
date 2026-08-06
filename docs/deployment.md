@@ -26,13 +26,17 @@ Every field is optional. `deploy.ts` reads the entry top-to-bottom with one
 cascading rule: **blank `paymentToken` triggers a full-stack rotation.** The
 rest of the fields decide reuse-vs-deploy independently:
 
-| Field           | Filled → reuse                                                                          | Blank → deploy                                                                                                                                       |
-| --------------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `paymentToken`  | use that ERC-20                                                                         | deploy fresh `ERC20MinimalMock` **and** force fresh Commerce + Router + Policy (cascade; `commerceProxy` / `routerProxy` are ignored in this branch) |
-| `treasury`      | passed into `commerce.initialize` on fresh path; logged only on reuse path              | fall back to the deployer                                                                                                                            |
-| `commerceProxy` | keep proxy; deploy new impl + signed `upgradeToAndCall`                                 | deploy fresh impl + `ERC1967Proxy` + `initialize` **and** force fresh Router (so it doesn't dangle)                                                  |
-| `routerProxy`   | keep proxy; deploy new impl + signed `upgradeToAndCall` (requires Commerce was reused)  | deploy fresh impl + `ERC1967Proxy` + `initialize`                                                                                                    |
-| `policy`        | (always rotated; the stored value is only used to print a "revoke old policy" reminder) | always freshly deployed + whitelisted                                                                                                                |
+| Field           | Filled → reuse                                                                                                                        | Blank → deploy                                                                                                                                       |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `paymentToken`  | use that ERC-20                                                                                                                       | deploy fresh `ERC20MinimalMock` **and** force fresh Commerce + Router + Policy (cascade; `commerceProxy` / `routerProxy` are ignored in this branch) |
+| `treasury`      | passed into `commerce.initialize` on fresh path; logged only on reuse path                                                            | fall back to the deployer                                                                                                                            |
+| `commerceProxy` | keep proxy; deploy new impl + `upgradeToAndCall` **only if the compiled bytecode differs from the on-chain impl** (immutables masked) | deploy fresh impl + `ERC1967Proxy` + `initialize` **and** force fresh Router (so it doesn't dangle)                                                  |
+| `routerProxy`   | keep proxy; same bytecode-diff rule (requires Commerce was reused)                                                                    | deploy fresh impl + `ERC1967Proxy` + `initialize`                                                                                                    |
+| `policy`        | reuse if its bytecode matches the artifact **and** it points at this entry's commerce/router; otherwise rotate + whitelist            | deploy fresh + whitelist                                                                                                                             |
+
+`disputeWindow` / `initialQuorum` live in Policy immutables and are invisible
+to the bytecode diff — to rotate params without a code change, blank `policy`
+to force a redeploy.
 
 The canonical version of this cascade lives as JSDoc at the top of
 [`scripts/addresses.ts`](../scripts/addresses.ts) — if the table above ever
@@ -43,20 +47,91 @@ drifts, that file wins.
 ```bash
 cp .env.example .env
 # fill BSC_TESTNET_PRIVATE_KEY (and ETHERSCAN_API_KEY if you plan to verify)
-bun run deploy:testnet
+bun run deploy:testnet                # DRY RUN: prints the plan, sends nothing
+DEPLOY_YES=1 bun run deploy:testnet   # executes the plan (`--yes` also works
+                                      # when the runner forwards CLI args)
 ```
 
-`deploy.ts` prints a block of `0x…` values; paste the ones it emits under the
-same `ADDRESSES` entry and commit. Subsequent runs will reuse them. The same
-command handles first deploys, impl upgrades, and full-stack rotations —
-there is no separate `upgrade:*` script.
+Every run is a **dry run by default**: it prints, per contract, whether it is
+`FRESH` / `UPGRADE` / `up-to-date` and who can execute each owner-gated call,
+then exits without sending a transaction. Re-run with `DEPLOY_YES=1` to
+execute. `deploy.ts` then prints a block of `0x…` values; paste the ones it
+emits under the same `ADDRESSES` entry and commit. Subsequent runs will reuse
+them. The same command handles first deploys, impl upgrades, and full-stack
+rotations — there is no separate `upgrade:*` script.
 
-The reuse paths of `commerceProxy` / `routerProxy` require the signer to
-still be the **owner** of both proxies — `upgradeToAndCall` and
-`setPolicyWhitelist` are owner-gated, and `deploy.ts` pre-checks `owner()`
-on both proxies before touching them. Once ownership has been transferred
-to the production multisig, run impl upgrades and policy rotations from the
-multisig directly.
+`upgradeToAndCall` and `setPolicyWhitelist` are owner-gated. `deploy.ts`
+checks `owner()` on each reused proxy:
+
+- owner == signer → the call is sent directly;
+- owner is anyone else (the production multisig, another EOA) → the new impl
+  / policy is still deployed (deployment is permissionless), but the
+  owner-gated call is **not** sent — the exact transaction (`to` / `value` /
+  `data`) is printed at the end, ready to paste into Safe{Wallet}. Until the
+  owner executes it, the new impl is deployed but not live behind the proxy.
+
+To rehearse a mainnet upgrade without touching mainnet, run the same command
+against the `bscFork` network (an in-process fork of BSC mainnet; uses the
+same `ADDRESSES` entry as `bsc`):
+
+```bash
+DEPLOY_YES=1 bunx hardhat run scripts/deploy.ts --network bscFork
+```
+
+### 2.1 · Upgrade workflow per environment
+
+Every environment follows the same skeleton — **dry-run → execute → paste
+addresses back → verify** — and is safe to re-run at any point: a dry run
+never sends a transaction, and in execute mode the bytecode diff skips every
+contract that is already `up-to-date`. The only difference between the
+environments is who executes the owner-gated calls.
+
+**QA (`bscTestnetQa` — proxies owned by the QA deployer key): fully automatic**
+
+```bash
+bun run deploy:testnet-qa                # 1. dry run: what needs upgrading?
+DEPLOY_YES=1 bun run deploy:testnet-qa   # 2. deploys impls AND sends upgradeToAndCall
+# 3. paste the printed fields into ADDRESSES["bscTestnetQa"], commit
+bun run verify:testnet-qa                # 4. explorer verification
+```
+
+**Testnet (`bscTestnet` — proxies owned by a teammate's EOA): hand off calldata**
+
+```bash
+bun run deploy:testnet                # 1. dry run: shows "UPGRADE (owner 0x… — calldata only)"
+DEPLOY_YES=1 bun run deploy:testnet   # 2. deploys impls, prints the owner tx instead of sending
+```
+
+3. Send the printed transaction (`to` / `value` / `data`) to the owner of the
+   proxies; they submit it as a plain EOA transaction.
+4. After it lands: paste the printed fields into `ADDRESSES["bscTestnet"]`,
+   commit, `bun run verify:testnet`.
+
+If the signer in `.env` ever _is_ the proxy owner, this collapses into the
+fully automatic QA flow — no script change needed.
+
+**Mainnet (`bsc` — proxies owned by the production Safe): calldata via Safe{Wallet}**
+
+```bash
+# 0. (optional, recommended) rehearse on the fork — same output as the real run
+DEPLOY_YES=1 bunx hardhat run scripts/deploy.ts --network bscFork
+
+bunx hardhat run scripts/deploy.ts --network bsc                # 1. dry run
+DEPLOY_YES=1 bunx hardhat run scripts/deploy.ts --network bsc   # 2. deploy impls + print Safe tx
+```
+
+3. In Safe{Wallet}: New transaction → paste `to`, `value = 0`, `data` →
+   collect signatures → execute.
+4. After the Safe executes: paste the printed fields into `ADDRESSES["bsc"]`,
+   commit, `bun run verify:mainnet`, and refresh `abis/` (`bun run abis`) if
+   contract source changed.
+5. Re-run the dry run — every contract reporting `up-to-date` confirms the
+   upgrade is live on-chain **and** the registry is in sync.
+
+One caveat applies to the calldata flows (testnet / mainnet): between step 2
+and the owner executing the transaction, do **not** re-run `DEPLOY_YES=1` —
+it would deploy another impl and print fresh calldata, orphaning the first
+one. Run steps 2→4 as one sitting per upgrade.
 
 ## 3 · Writing a V2 implementation safely
 
