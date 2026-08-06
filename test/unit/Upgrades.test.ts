@@ -25,16 +25,19 @@ import {
  *      through the v2 ABI, and a freshly-minted v2-only method reports the
  *      new version.
  */
-describe("UUPS upgrades", async () => {
-  const { viem } = await network.connect();
+// Top-level await, NOT an async describe: bun's collector does not await an
+// async describe callback, so tests registered after its first `await` are
+// silently dropped when multiple test files load in parallel.
+const { viem } = await network.connect();
 
-  const [deployerW, clientW, providerW, evaluatorW, treasuryW] = await viem.getWalletClients();
-  const deployer = getAddress(deployerW.account.address);
-  const client = getAddress(clientW.account.address);
-  const provider = getAddress(providerW.account.address);
-  const evaluator = getAddress(evaluatorW.account.address);
-  const treasury = getAddress(treasuryW.account.address);
+const [deployerW, clientW, providerW, evaluatorW, treasuryW] = await viem.getWalletClients();
+const deployer = getAddress(deployerW.account.address);
+const client = getAddress(clientW.account.address);
+const provider = getAddress(providerW.account.address);
+const evaluator = getAddress(evaluatorW.account.address);
+const treasury = getAddress(treasuryW.account.address);
 
+describe("UUPS upgrades", () => {
   describe("AgenticCommerceUpgradeable", () => {
     it("upgradeToAndCall preserves proxy address and storage", async () => {
       const token = await deployMockToken(viem);

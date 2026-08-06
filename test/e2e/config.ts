@@ -7,7 +7,12 @@
  * owner + client + provider by default. See `test/e2e/README.md`.
  */
 
-const SUPPORTED_NETWORKS = new Set(["localhost", "bscTestnet"]);
+const SUPPORTED_NETWORKS = new Set(["localhost", "bscTestnet", "bscTestnetQa"]);
+
+/** Env var holding the deployer/owner key for a given remote network. */
+export function ownerKeyEnvVar(networkName: string): string {
+  return networkName === "bscTestnetQa" ? "BSC_TESTNET_QA_PRIVATE_KEY" : "BSC_TESTNET_PRIVATE_KEY";
+}
 
 export type NetworkKind = "local" | "testnet";
 
@@ -106,14 +111,14 @@ export function loadConfig(networkName: string): E2EConfig {
   };
 
   if (kind === "testnet") {
-    // Reuse `BSC_TESTNET_PRIVATE_KEY` (already required by hardhat for the
-    // `bscTestnet` network) as the owner. Deployer is router.owner() until
+    // Reuse the network's deployer key (already required by hardhat for that
+    // network) as the owner. Deployer is router.owner() until
     // ownership is transferred, so this is the right key in the common case;
     // if ownership was transferred away, the preflight `Router owner mismatch`
     // error will make that obvious.
     // `E2E_CLIENT_KEY` / `E2E_PROVIDER_KEY` stay optional and fall back to the
     // owner, collapsing testnet E2E to a single wallet by default.
-    const ownerKey = envPrivateKey("BSC_TESTNET_PRIVATE_KEY");
+    const ownerKey = envPrivateKey(ownerKeyEnvVar(networkName));
     cfg.testnet = {
       ownerKey,
       clientKey: envPrivateKeyOptional("E2E_CLIENT_KEY") ?? ownerKey,

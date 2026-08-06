@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { getAddress } from "viem";
+import { getAddress, keccak256, toBytes } from "viem";
 
 import {
   JobStatus,
@@ -12,17 +12,19 @@ import {
   createFundedSubmittedJob,
 } from "./helpers.js";
 
-describe("End-to-end lifecycle", async () => {
-  const { viem } = await network.connect();
-  const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W] =
-    await viem.getWalletClients();
-  const deployer = getAddress(deployerW.account.address);
-  const client = getAddress(clientW.account.address);
-  const provider = getAddress(providerW.account.address);
-  const treasury = getAddress(treasuryW.account.address);
-  const voter1 = getAddress(voter1W.account.address);
-  const voter2 = getAddress(voter2W.account.address);
+// Top-level await, NOT an async describe: bun's collector does not await an
+// async describe callback, so tests registered after its first `await` are
+// silently dropped when multiple test files load in parallel.
+const { viem } = await network.connect();
+const [deployerW, clientW, providerW, treasuryW, voter1W, voter2W] = await viem.getWalletClients();
+const deployer = getAddress(deployerW.account.address);
+const client = getAddress(clientW.account.address);
+const provider = getAddress(providerW.account.address);
+const treasury = getAddress(treasuryW.account.address);
+const voter1 = getAddress(voter1W.account.address);
+const voter2 = getAddress(voter2W.account.address);
 
+describe("End-to-end lifecycle", () => {
   async function setup(platformFeeBP: bigint = 0n) {
     const ctx = await deployStack(viem, {
       owner: deployer,
@@ -185,5 +187,80 @@ describe("End-to-end lifecycle", async () => {
     await ctx.router.write.unpause();
     await ctx.router.write.settle([jobId, "0x"]);
     assert.equal((await ctx.commerce.read.getJob([jobId])).status, JobStatus.Completed);
+  });
+
+  // ==================================================================
+  // Seller-side zero price through the full Router / Policy stack.
+  // Proves the Route A design claim: a free job stays on the normal
+  // Funded main-trunk, keeps the Router's beforeAction(FUND) gate on
+  // path, and reconciles jobInflightCount via the existing terminal
+  // paths — no Router / Policy / claimRefund change needed.
+  // ==================================================================
+
+  async function createRoutedZeroPriceJob(ctx: any, expiresIn: bigint = 86_400n) {
+    const publicClient = await viem.getPublicClient();
+    const block = await publicClient.getBlock();
+    const expiredAt = block.timestamp + expiresIn;
+
+    const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+    const routerAsClient = await asRouter(ctx.router.address, clientW);
+    await commerceAsClient.write.createJob([
+      provider,
+      ctx.router.address,
+      expiredAt,
+      "Zero-price integration job",
+      ctx.router.address,
+    ]);
+    const jobId = 1n;
+    await routerAsClient.write.registerJob([jobId, ctx.policy.address]);
+
+    // Provider offers the job for free; client then funds it WITHOUT any
+    // token mint or approval — a zero-price fund must move no tokens.
+    const commerceAsProvider = await asCommerce(ctx.commerce.address, providerW);
+    await commerceAsProvider.write.setBudget([jobId, 0n, "0x"]);
+    await commerceAsClient.write.fund([jobId, 0n, "0x"]);
+    return { jobId, expiredAt };
+  }
+
+  it("Zero-price approve path: routed free job funds (no transfer), submits, settles to Completed", async () => {
+    // Non-zero fee to prove the fee math zeroes out for a free job.
+    const ctx = await setup(500n);
+    const { jobId } = await createRoutedZeroPriceJob(ctx);
+
+    // fund moved to Funded with no escrow, and the Router counted it in-flight.
+    assert.equal((await ctx.commerce.read.getJob([jobId])).status, JobStatus.Funded);
+    assert.equal(await ctx.token.read.balanceOf([ctx.commerce.address]), 0n);
+    assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+
+    const commerceAsProvider = await asCommerce(ctx.commerce.address, providerW);
+    await commerceAsProvider.write.submit([jobId, keccak256(toBytes("free-deliverable")), "0x"]);
+
+    await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+    await ctx.router.write.settle([jobId, "0x"]);
+
+    assert.equal((await ctx.commerce.read.getJob([jobId])).status, JobStatus.Completed);
+    assert.equal(await ctx.token.read.balanceOf([provider]), 0n);
+    assert.equal(await ctx.token.read.balanceOf([treasury]), 0n);
+    // afterAction(complete) reconciled Router bookkeeping (audit L03).
+    assert.equal(await ctx.router.read.inflightJobCount(), 0n);
+  });
+
+  it("Zero-price expiry path: unsubmitted free job → claimRefund → markExpired clears inflight", async () => {
+    const ctx = await setup();
+    const expiresIn = 3600n;
+    const { jobId } = await createRoutedZeroPriceJob(ctx, expiresIn);
+    assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+
+    // Provider never submits; the free job must still reach a terminal state
+    // instead of stranding the Router's inflight counter (the failure mode
+    // that Route B would have introduced).
+    await advanceSeconds(viem, Number(expiresIn) + 100);
+    await ctx.commerce.write.claimRefund([jobId]);
+    assert.equal((await ctx.commerce.read.getJob([jobId])).status, JobStatus.Expired);
+    assert.equal(await ctx.token.read.balanceOf([client]), 0n);
+
+    // claimRefund is not hookable → reconcile Router state via markExpired.
+    await ctx.router.write.markExpired([jobId]);
+    assert.equal(await ctx.router.read.inflightJobCount(), 0n);
   });
 });

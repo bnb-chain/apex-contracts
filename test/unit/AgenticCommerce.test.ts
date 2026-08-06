@@ -14,25 +14,28 @@ import {
   advanceSeconds,
 } from "./helpers.js";
 
-describe("AgenticCommerceUpgradeable", async () => {
-  const { viem } = await network.connect();
-  const publicClient = await viem.getPublicClient();
+// Top-level await, NOT an async describe: bun's collector does not await an
+// async describe callback, so tests registered after its first `await` are
+// silently dropped when multiple test files load in parallel.
+const { viem } = await network.connect();
+const publicClient = await viem.getPublicClient();
 
-  const [deployerW, clientW, providerW, evaluatorW, treasuryW, otherW] =
-    await viem.getWalletClients();
-  const deployer = getAddress(deployerW.account.address);
-  const client = getAddress(clientW.account.address);
-  const provider = getAddress(providerW.account.address);
-  const evaluator = getAddress(evaluatorW.account.address);
-  const treasury = getAddress(treasuryW.account.address);
-  const other = getAddress(otherW.account.address);
+const [deployerW, clientW, providerW, evaluatorW, treasuryW, otherW] =
+  await viem.getWalletClients();
+const deployer = getAddress(deployerW.account.address);
+const client = getAddress(clientW.account.address);
+const provider = getAddress(providerW.account.address);
+const evaluator = getAddress(evaluatorW.account.address);
+const treasury = getAddress(treasuryW.account.address);
+const other = getAddress(otherW.account.address);
 
-  // Shared no-op IACPHook used as a benign placeholder for tests that don't
-  // exercise hook semantics. Required after audit L05: createJob now rejects
-  // hook == address(0) with `HookRequired`.
-  const noopHook = await deployNoopHook(viem);
-  const noopHookAddr = noopHook.address as `0x${string}`;
+// Shared no-op IACPHook used as a benign placeholder for tests that don't
+// exercise hook semantics. Required after audit L05: createJob now rejects
+// hook == address(0) with `HookRequired`.
+const noopHook = await deployNoopHook(viem);
+const noopHookAddr = noopHook.address as `0x${string}`;
 
+describe("AgenticCommerceUpgradeable", () => {
   async function setup() {
     const token = await deployMockToken(viem);
     const { proxy, impl } = await deployCommerce(viem, {
@@ -620,6 +623,171 @@ describe("AgenticCommerceUpgradeable", async () => {
   });
 
   // ==================================================================
+  // Zero price
+  // ==================================================================
+
+  describe("zero price", () => {
+    it("provider may set budget == 0 (jobHasBudget flips true)", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+
+      const job = await commerce.read.getJob([1n]);
+      assert.equal(job.budget, 0n);
+      assert.equal(await commerce.read.jobHasBudget([1n]), true);
+    });
+
+    it("client can set budget == 0", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      await commerceAsClient.write.setBudget([1n, 0n, "0x"]);
+
+      const job = await commerce.read.getJob([1n]);
+      assert.equal(job.budget, 0n);
+      assert.equal(await commerce.read.jobHasBudget([1n]), true);
+    });
+
+    it("zero-budget job still requires a bound provider to fund", async () => {
+      const { commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      // Provider unset at creation: setBudget(0) is fine (client is a valid
+      // caller), but fund keeps the ProviderNotSet gate.
+      await commerceAsClient.write.createJob([
+        zeroAddress,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      await commerceAsClient.write.setBudget([1n, 0n, "0x"]);
+      await assert.rejects(commerceAsClient.write.fund([1n, 0n, "0x"]), /ProviderNotSet/);
+    });
+
+    it("fund on a zero-budget job transitions to Funded without any transfer", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+
+      // No mint / approve: the client funds a free job with no allowance.
+      const txHash = await commerceAsClient.write.fund([1n, 0n, "0x"]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      const job = await commerce.read.getJob([1n]);
+      assert.equal(job.status, JobStatus.Funded);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+
+      const funded = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "JobFunded",
+      }) as unknown as Array<{ args: { jobId: bigint; amount: bigint } }>;
+      assert.equal(funded.length, 1);
+      assert.equal(funded[0].args.amount, 0n);
+    });
+
+    it("full zero-price happy path: complete pays nobody but reaches Completed", async () => {
+      const { token, commerce } = await setup();
+      // Non-zero fee to prove fee math also zeroes out.
+      await commerce.write.setPlatformFee([500n, treasury]);
+
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+      await commerceAsProvider.write.submit([1n, keccak256(toBytes("free")), "0x"]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      const txHash = await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Completed);
+
+      const released = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "PaymentReleased",
+      }) as unknown as Array<{ args: { jobId: bigint; amount: bigint } }>;
+      assert.equal(released.length, 1);
+      assert.equal(released[0].args.amount, 0n);
+    });
+
+    it("evaluator rejects a zero-budget Funded job with no refund transfer", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
+
+      assert.equal(await token.read.balanceOf([client]), 0n);
+      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Rejected);
+    });
+
+    it("zero-budget job expires to Expired via claimRefund with no transfer", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "",
+        noopHookAddr,
+      ]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.setBudget([1n, 0n, "0x"]);
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+
+      await advanceSeconds(viem, 3700);
+      await commerce.write.claimRefund([1n]);
+
+      assert.equal(await token.read.balanceOf([client]), 0n);
+      assert.equal((await commerce.read.getJob([1n])).status, JobStatus.Expired);
+    });
+  });
+
+  // ==================================================================
   // Admin
   // ==================================================================
 
@@ -720,20 +888,32 @@ describe("AgenticCommerceUpgradeable", async () => {
       );
     });
 
-    // [I02] setBudget(0) used to silently flip jobHasBudget to true and
-    //       leave fund() to fail with a confusing "ZeroBudget" path. The
-    //       kernel now rejects amount == 0 at the source.
-    it("[I02] setBudget rejects amount == 0 with ZeroBudget", async () => {
+    // [I02] setBudget(0) used to be rejected outright so `Funded ⇒ budget > 0`
+    //       held as a kernel invariant. Zero price deliberately relaxes it for
+    //       BOTH parties (compliance doc Delta 4): every transfer site guards
+    //       `> 0`, and off-chain the provider verifies the funded budget
+    //       against its signed quote before working. What survives of I02 is
+    //       "no fund without an explicit setBudget" — jobHasBudget, not the
+    //       amount, is the gate (asserted in the fund suite).
+    it("[I02] setBudget(0) is symmetric: client and provider may both set it", async () => {
       const { commerce } = await setup();
       const commerceAsClient = await asCommerce(commerce.address, clientW);
-      await commerceAsClient.write.createJob([
-        provider,
-        evaluator,
-        await futureTs(3600),
-        "",
-        noopHookAddr,
-      ]);
-      await assert.rejects(commerceAsClient.write.setBudget([1n, 0n, "0x"]), /ZeroBudget/);
+      for (let i = 0; i < 2; i++) {
+        await commerceAsClient.write.createJob([
+          provider,
+          evaluator,
+          await futureTs(3600),
+          "",
+          noopHookAddr,
+        ]);
+      }
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsClient.write.setBudget([1n, 0n, "0x"]);
+      await commerceAsProvider.write.setBudget([2n, 0n, "0x"]);
+      assert.equal((await commerce.read.getJob([1n])).budget, 0n);
+      assert.equal((await commerce.read.getJob([2n])).budget, 0n);
+      assert.equal(await commerce.read.jobHasBudget([1n]), true);
+      assert.equal(await commerce.read.jobHasBudget([2n]), true);
     });
 
     // [I03] JobFunded carries an indexed `provider` topic so providers can

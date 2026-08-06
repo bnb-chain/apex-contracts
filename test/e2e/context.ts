@@ -176,9 +176,11 @@ async function buildTestnetContext(
     throw new Error(`scripts/addresses.ts has no entry for "${cfg.networkName}".`);
   }
   if (!addrs.commerceProxy || !addrs.routerProxy) {
+    const deployScript =
+      cfg.networkName === "bscTestnetQa" ? "deploy:testnet-qa" : "deploy:testnet";
     throw new Error(
       `scripts/addresses.ts["${cfg.networkName}"] is missing commerceProxy and/or routerProxy. ` +
-        `Run \`bun run deploy:testnet\` first and paste the printed block into addresses.ts.`,
+        `Run \`bun run ${deployScript}\` first and paste the printed block into addresses.ts.`,
     );
   }
 

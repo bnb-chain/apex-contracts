@@ -65,6 +65,14 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
     routerImpl: "0x9f42b71ae5990e6f5bb58a935fffe32b29a5374a",
     policy: "0x4f4678d4439fec812ac7674bb3efb4c8f5fb78a6",
   },
+  bscTestnetQa: {
+    paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // same U as bscTestnet
+    commerceProxy: "0x61d606db08c6acc393fd33e9c07da8f687771b6f",
+    commerceImpl: "0xf96775465546615a00048b0fda41efda51db5fe7",
+    routerProxy: "0x1f31eb0183b64f57dbb1193ad9525dda27fcd02b",
+    routerImpl: "0xc1060ce42b2b1162fa0e66ba3ebc241e6b08c410",
+    policy: "0x23437ee9c2797ca26e7209a7456c60b39306001c",
+  },
   bsc: {
     paymentToken: "0xcE24439F2D9C6a2289F741120FE202248B666666", // e.g. U on BSC Mainnet
     treasury: "0x000000000000000000000000000000000000dEaD",
