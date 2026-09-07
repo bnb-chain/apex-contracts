@@ -14,6 +14,8 @@ import {
 import {
   DEFAULT_BUDGET,
   DEFAULT_DISPUTE_WINDOW,
+  JobStatus,
+  deployMockToken,
   deployStack,
   deployNoopHook,
   blockTimestamp,
@@ -341,6 +343,49 @@ describe("EvaluatorRouterUpgradeable", () => {
   });
 
   describe("settle", () => {
+    it("routes createJobWithToken through register, fund, submit, and settle", async () => {
+      const ctx = await setup();
+      const token6 = await deployMockToken(viem, 6);
+      const budget = 1_000_000n;
+      await ctx.commerce.write.setPaymentTokenSupported([token6.address, true]);
+
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+      await commerceAsClient.write.createJobWithToken([
+        provider,
+        ctx.router.address,
+        await futureTs(86_400),
+        "Router multi-token job",
+        ctx.router.address,
+        token6.address,
+      ]);
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
+      await routerAsClient.write.registerJob([1n, ctx.policy.address]);
+      await commerceAsClient.write.setBudget([1n, budget, "0x"]);
+
+      await token6.write.mint([client, budget]);
+      const tokenAsClient = await asToken(token6.address, clientW);
+      await tokenAsClient.write.approve([ctx.commerce.address, budget]);
+      await commerceAsClient.write.fund([1n, budget, "0x"]);
+
+      const commerceAsProvider = await asCommerce(ctx.commerce.address, providerW);
+      await commerceAsProvider.write.submit([
+        1n,
+        keccak256(toBytes("router-multi-token-deliverable")),
+        "0x",
+      ]);
+      await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+      await ctx.router.write.settle([1n, "0x"]);
+
+      assert.equal(
+        getAddress(await ctx.commerce.read.jobPaymentToken([1n])),
+        getAddress(token6.address),
+      );
+      assert.equal((await ctx.commerce.read.getJob([1n])).status, JobStatus.Completed);
+      assert.equal(await token6.read.balanceOf([provider]), budget);
+      assert.equal(await token6.read.balanceOf([ctx.commerce.address]), 0n);
+      assert.equal(await ctx.token.read.balanceOf([provider]), 0n);
+    });
+
     it("reverts PolicyNotSet when jobId has no binding", async () => {
       const { router } = await setup();
       await assert.rejects(router.write.settle([1n, "0x"]), /PolicyNotSet/);

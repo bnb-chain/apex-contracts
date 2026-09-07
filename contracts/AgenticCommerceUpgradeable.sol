@@ -53,16 +53,17 @@ contract AgenticCommerceUpgradeable is
     // Storage (flat upgradeable layout; append-only)
     // ---------------------------------------------------------------
 
-    /// @notice ERC-20 escrow / settlement token. Set once in {initialize}
-    ///         and immutable thereafter.
+    /// @notice Default ERC-20 escrow / settlement token and compatibility
+    ///         fallback for jobs created before the multi-token upgrade. Set
+    ///         once in {initialize} and immutable thereafter.
     /// @dev    Stored as `address` so the auto-generated public getter
     ///         matches `IACP.paymentToken()` exactly.
     ///
     ///         **TOKEN CONTRACT REQUIREMENTS — deployer responsibility
-    ///         (audit I01):** `paymentToken` MUST be a standard ERC-20
-    ///         whose `transfer` / `transferFrom` deliver exactly the
-    ///         requested amount and whose held balance does not
-    ///         spontaneously change between calls.
+    ///         (audit I01):** every token added to the payment-token allowlist
+    ///         MUST be a standard ERC-20 whose `transfer` / `transferFrom`
+    ///         deliver exactly the requested amount and whose held balance
+    ///         does not spontaneously change between calls.
     ///
     ///         The kernel does NOT reconcile pre/post `balanceOf` in
     ///         {fund}; `job.budget` is taken at face value. Deploying
@@ -80,8 +81,8 @@ contract AgenticCommerceUpgradeable is
     ///             without an outgoing `transfer` from `address`.
     ///
     ///         Vetted choices on BNB Chain include USDT, USDC, and
-    ///         other audited stablecoins. Confirm against the token's
-    ///         source before {initialize}.
+    ///         other audited stablecoins. Confirm every token against its
+    ///         source before adding it to the allowlist.
     address public paymentToken;
 
     /// @notice Platform fee in basis points (0..10_000).
@@ -102,8 +103,11 @@ contract AgenticCommerceUpgradeable is
     ///         Required because `budget == 0` is a legal state before setup.
     mapping(uint256 jobId => bool hasBudget) public jobHasBudget;
 
+    mapping(uint256 jobId => address token) private _jobPaymentTokens;
+    mapping(address token => bool supported) private _supportedPaymentTokens;
+
     /// @dev Reserved storage slots for future upgrades.
-    uint256[44] private __gap;
+    uint256[42] private __gap;
 
     // ---------------------------------------------------------------
     // Events (ERC-8183 standard set; no ReputationSignal)
@@ -135,6 +139,8 @@ contract AgenticCommerceUpgradeable is
     event PaymentReleased(uint256 indexed jobId, address indexed provider, uint256 amount);
     event Refunded(uint256 indexed jobId, address indexed client, uint256 amount);
     event PlatformFeeUpdated(uint256 feeBP, address indexed treasury);
+    event PaymentTokenSupportUpdated(address indexed token, bool supported);
+    event JobPaymentTokenBound(uint256 indexed jobId, address indexed token);
 
     // ---------------------------------------------------------------
     // Errors
@@ -159,6 +165,8 @@ contract AgenticCommerceUpgradeable is
     error FeeTooHigh();
     error HookMissingInterface();
     error HookCallFailed();
+    error UnsupportedPaymentToken();
+    error TokenHasNoCode();
     /// @notice Thrown by {createJob} when `hook == address(0)`. Every job MUST
     ///         have a hook contract — the zero address bypasses
     ///         `_beforeHook` / `_afterHook` and would silently disable any
@@ -198,6 +206,26 @@ contract AgenticCommerceUpgradeable is
         platformTreasury = treasury_;
     }
 
+    function initializeMultiToken(address[] calldata tokens) external reinitializer(2) onlyOwner {
+        bool containsDefaultToken;
+        uint256 length = tokens.length;
+        for (uint256 i; i < length; ++i) {
+            address token = tokens[i];
+            _validatePaymentToken(token);
+            if (token == paymentToken) containsDefaultToken = true;
+            for (uint256 j; j < i; ++j) {
+                if (tokens[j] == token) revert UnsupportedPaymentToken();
+            }
+        }
+        if (!containsDefaultToken) revert UnsupportedPaymentToken();
+
+        for (uint256 i; i < length; ++i) {
+            address token = tokens[i];
+            _supportedPaymentTokens[token] = true;
+            emit PaymentTokenSupportUpdated(token, true);
+        }
+    }
+
     // ---------------------------------------------------------------
     // UUPS
     // ---------------------------------------------------------------
@@ -221,6 +249,17 @@ contract AgenticCommerceUpgradeable is
         platformFeeBP = feeBP_;
         platformTreasury = treasury_;
         emit PlatformFeeUpdated(feeBP_, treasury_);
+    }
+
+    function setPaymentTokenSupported(address token, bool supported) external onlyOwner {
+        if (token == address(0)) revert ZeroAddress();
+        if (supported && token.code.length == 0) revert TokenHasNoCode();
+        _supportedPaymentTokens[token] = supported;
+        emit PaymentTokenSupportUpdated(token, supported);
+    }
+
+    function isPaymentTokenSupported(address token) external view returns (bool) {
+        return _supportedPaymentTokens[token];
     }
 
     function pause() external onlyOwner {
@@ -272,6 +311,11 @@ contract AgenticCommerceUpgradeable is
         revert HookCallFailed();
     }
 
+    function _validatePaymentToken(address token) private view {
+        if (token == address(0)) revert ZeroAddress();
+        if (token.code.length == 0) revert TokenHasNoCode();
+    }
+
     // ---------------------------------------------------------------
     // ERC-8183 core
     // ---------------------------------------------------------------
@@ -295,6 +339,31 @@ contract AgenticCommerceUpgradeable is
         string calldata description,
         address hook
     ) external nonReentrant whenNotPaused returns (uint256 jobId) {
+        if (!_supportedPaymentTokens[paymentToken]) revert UnsupportedPaymentToken();
+        return _createJob(provider, evaluator, expiredAt, description, hook, paymentToken, this.createJob.selector);
+    }
+
+    function createJobWithToken(
+        address provider,
+        address evaluator,
+        uint256 expiredAt,
+        string calldata description,
+        address hook,
+        address token
+    ) external nonReentrant whenNotPaused returns (uint256 jobId) {
+        if (!_supportedPaymentTokens[token]) revert UnsupportedPaymentToken();
+        return _createJob(provider, evaluator, expiredAt, description, hook, token, this.createJobWithToken.selector);
+    }
+
+    function _createJob(
+        address provider,
+        address evaluator,
+        uint256 expiredAt,
+        string calldata description,
+        address hook,
+        address token,
+        bytes4 selector
+    ) private returns (uint256 jobId) {
         if (evaluator == address(0)) revert ZeroAddress();
         if (expiredAt <= block.timestamp + 5 minutes) revert ExpiryTooShort();
         if (expiredAt > block.timestamp + MAX_EXPIRY_DURATION) revert ExpiryTooLong();
@@ -319,9 +388,21 @@ contract AgenticCommerceUpgradeable is
             submittedAt: 0,
             deliverable: bytes32(0)
         });
+        _jobPaymentTokens[jobId] = token;
         emit JobCreated(jobId, msg.sender, provider, evaluator, expiredAt, hook);
+        emit JobPaymentTokenBound(jobId, token);
 
-        _afterHook(hook, jobId, this.createJob.selector, abi.encode(msg.sender, provider, evaluator));
+        bytes memory hookData =
+            selector == this.createJob.selector
+                ? abi.encode(msg.sender, provider, evaluator)
+                : abi.encode(msg.sender, provider, evaluator, token);
+        _afterHook(hook, jobId, selector, hookData);
+    }
+
+    function jobPaymentToken(uint256 jobId) public view override returns (address) {
+        if (jobs[jobId].id == 0) revert InvalidJob();
+        address token = _jobPaymentTokens[jobId];
+        return token == address(0) ? paymentToken : token;
     }
 
     /// @notice Client sets the provider after creation (only allowed while Open
@@ -397,10 +478,12 @@ contract AgenticCommerceUpgradeable is
         if (job.budget != expectedBudget) revert BudgetMismatch();
         if (block.timestamp >= job.expiredAt) revert WrongStatus();
 
+        IERC20 token = IERC20(jobPaymentToken(jobId));
+        if (job.budget > 0 && !_supportedPaymentTokens[address(token)]) revert UnsupportedPaymentToken();
         _beforeHook(job.hook, jobId, this.fund.selector, optParams);
         job.status = JobStatus.Funded;
         if (job.budget > 0) {
-            IERC20(paymentToken).safeTransferFrom(job.client, address(this), job.budget);
+            token.safeTransferFrom(job.client, address(this), job.budget);
         }
         _afterHook(job.hook, jobId, this.fund.selector, optParams);
 
@@ -447,6 +530,7 @@ contract AgenticCommerceUpgradeable is
         if (job.status != JobStatus.Submitted) revert WrongStatus();
         if (msg.sender != job.evaluator) revert Unauthorized();
 
+        IERC20 token = IERC20(jobPaymentToken(jobId));
         bytes memory hookData = abi.encode(reason, optParams);
         _beforeHook(job.hook, jobId, this.complete.selector, hookData);
         job.status = JobStatus.Completed;
@@ -456,10 +540,10 @@ contract AgenticCommerceUpgradeable is
         uint256 net = amount - platformFee;
 
         if (platformFee > 0) {
-            IERC20(paymentToken).safeTransfer(platformTreasury, platformFee);
+            token.safeTransfer(platformTreasury, platformFee);
         }
         if (net > 0) {
-            IERC20(paymentToken).safeTransfer(job.provider, net);
+            token.safeTransfer(job.provider, net);
         }
 
         _afterHook(job.hook, jobId, this.complete.selector, hookData);
@@ -479,6 +563,7 @@ contract AgenticCommerceUpgradeable is
     ) external override nonReentrant whenNotPaused {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
+        IERC20 token = IERC20(jobPaymentToken(jobId));
 
         JobStatus prev = job.status;
         if (prev == JobStatus.Open) {
@@ -494,7 +579,7 @@ contract AgenticCommerceUpgradeable is
         job.status = JobStatus.Rejected;
 
         if ((prev == JobStatus.Funded || prev == JobStatus.Submitted) && job.budget > 0) {
-            IERC20(paymentToken).safeTransfer(job.client, job.budget);
+            token.safeTransfer(job.client, job.budget);
             emit Refunded(jobId, job.client, job.budget);
         }
 
@@ -509,6 +594,7 @@ contract AgenticCommerceUpgradeable is
     function claimRefund(uint256 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
         if (job.id == 0) revert InvalidJob();
+        IERC20 token = IERC20(jobPaymentToken(jobId));
         if (job.status != JobStatus.Funded && job.status != JobStatus.Submitted) {
             revert WrongStatus();
         }
@@ -516,7 +602,7 @@ contract AgenticCommerceUpgradeable is
 
         job.status = JobStatus.Expired;
         if (job.budget > 0) {
-            IERC20(paymentToken).safeTransfer(job.client, job.budget);
+            token.safeTransfer(job.client, job.budget);
             emit Refunded(jobId, job.client, job.budget);
         }
         emit JobExpired(jobId);
