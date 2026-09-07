@@ -7,6 +7,7 @@ import {
   JobStatus,
   DEFAULT_BUDGET,
   DEFAULT_DISPUTE_WINDOW,
+  deployMockToken,
   deployStack,
   advanceSeconds,
   createFundedSubmittedJob,
@@ -68,6 +69,47 @@ describe("End-to-end lifecycle", () => {
     assert.equal(await ctx.token.read.balanceOf([provider]), net);
     assert.equal(await ctx.token.read.balanceOf([treasury]), fee);
     assert.equal((await ctx.commerce.read.getJob([jobId])).status, JobStatus.Completed);
+  });
+
+  it("Approve path settles a disabled 6-decimal bound token", async () => {
+    const ctx = await setup(250n);
+    const token = await deployMockToken(viem, 6);
+    const budget = 1_000_000n;
+    await ctx.commerce.write.setPaymentTokenSupported([token.address, true]);
+
+    const publicClient = await viem.getPublicClient();
+    const block = await publicClient.getBlock();
+    const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+    await commerceAsClient.write.createJobWithToken([
+      provider,
+      ctx.router.address,
+      block.timestamp + 86_400n,
+      "6-decimal integration job",
+      ctx.router.address,
+      token.address,
+    ]);
+    const routerAsClient = await asRouter(ctx.router.address, clientW);
+    await routerAsClient.write.registerJob([1n, ctx.policy.address]);
+    await commerceAsClient.write.setBudget([1n, budget, "0x"]);
+    await token.write.mint([client, budget]);
+    const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+      client: { wallet: clientW },
+    });
+    await tokenAsClient.write.approve([ctx.commerce.address, budget]);
+    await commerceAsClient.write.fund([1n, budget, "0x"]);
+
+    const commerceAsProvider = await asCommerce(ctx.commerce.address, providerW);
+    await commerceAsProvider.write.submit([1n, keccak256(toBytes("six-decimal")), "0x"]);
+    await ctx.commerce.write.setPaymentTokenSupported([token.address, false]);
+    await advanceSeconds(viem, Number(DEFAULT_DISPUTE_WINDOW) + 1);
+    await ctx.router.write.settle([1n, "0x"]);
+
+    assert.equal(await token.read.balanceOf([client]), 0n);
+    assert.equal(await token.read.balanceOf([ctx.commerce.address]), 0n);
+    assert.equal(await token.read.balanceOf([provider]), 975_000n);
+    assert.equal(await token.read.balanceOf([treasury]), 25_000n);
+    assert.equal(await ctx.token.read.balanceOf([ctx.commerce.address]), 0n);
+    assert.equal((await ctx.commerce.read.getJob([1n])).status, JobStatus.Completed);
   });
 
   // ==================================================================
