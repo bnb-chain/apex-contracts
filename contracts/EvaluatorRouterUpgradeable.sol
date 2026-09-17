@@ -69,7 +69,8 @@ contract EvaluatorRouterUpgradeable is
         ///         yet been reflected back into Router-side bookkeeping.
         ///         Increments on {registerJob}; decrements on the kernel's
         ///         post-action callback for `complete` / `reject`, or via
-        ///         {markExpired} for the non-hookable `claimRefund` path.
+        ///         {markExpired} for the non-hookable `claimRefund` path and
+        ///         for jobs abandoned in `Open` past `expiredAt`.
         ///         Gates {setCommerce} so the Router cannot be repointed at a
         ///         new kernel while jobs are still in flight (audit L03).
         uint256 jobInflightCount;
@@ -106,6 +107,8 @@ contract EvaluatorRouterUpgradeable is
     ///         kernel status read at finalisation time:
     ///           - `Completed` / `Rejected`: synthetic; afterAction-driven.
     ///           - `Expired`: explicit, via {markExpired} after `claimRefund`.
+    ///           - `Open`: explicit, via {markExpired} on a job abandoned
+    ///             past `expiredAt`.
     event JobFinalised(uint256 indexed jobId, IACP.JobStatus indexed status);
 
     // ---------------------------------------------------------------
@@ -116,6 +119,11 @@ contract EvaluatorRouterUpgradeable is
     error NotCommerce();
     error NotJobClient();
     error JobNotOpen();
+    /// @notice Thrown by {registerJob} when the job is still `Open` but has
+    ///         already passed `expiredAt`. Such a job can never be funded, so
+    ///         registering it would only inflate {jobInflightCount} with a
+    ///         slot that {markExpired} has to immediately reclaim (audit L02).
+    error JobExpired();
     error RouterNotEvaluator();
     error RouterNotHook();
     error PolicyNotWhitelisted();
@@ -181,7 +189,8 @@ contract EvaluatorRouterUpgradeable is
     ///              - `complete` / `reject` decrements `jobInflightCount`
     ///                automatically via {afterAction}.
     ///              - For jobs that exit via the non-hookable `claimRefund`
-    ///                path on the kernel (status → `Expired`), anyone calls
+    ///                path on the kernel (status → `Expired`), and for jobs
+    ///                left `Open` past `expiredAt`, anyone calls
     ///                {markExpired} to reconcile Router-side state.
     ///           3. Once `inflightJobCount() == 0`, `setCommerce` succeeds.
     ///         See `docs/design.md` §6 R6 "Router drain SOP".
@@ -240,6 +249,7 @@ contract EvaluatorRouterUpgradeable is
     /// @notice Bind `policy` to `jobId`. Callable only by the job's client.
     /// @dev    Preconditions:
     ///           - Job status == Open.
+    ///           - `block.timestamp < job.expiredAt` (audit L02).
     ///           - `job.evaluator == address(this)`.
     ///           - `job.hook      == address(this)`.
     ///           - `policy` is whitelisted.
@@ -256,6 +266,7 @@ contract EvaluatorRouterUpgradeable is
 
         IACP.Job memory job = $.commerce.getJob(jobId);
         if (job.id == 0 || job.status != IACP.JobStatus.Open) revert JobNotOpen();
+        if (block.timestamp >= job.expiredAt) revert JobExpired();
         if (msg.sender != job.client) revert NotJobClient();
         if (job.evaluator != address(this)) revert RouterNotEvaluator();
         if (job.hook != address(this)) revert RouterNotHook();
@@ -267,25 +278,32 @@ contract EvaluatorRouterUpgradeable is
         emit JobRegistered(jobId, policy, msg.sender);
     }
 
-    /// @notice Reconcile a `claimRefund`-driven exit (kernel status =
-    ///         `Expired`) into Router-side bookkeeping.
-    /// @dev    Permissionless. Required because `claimRefund` MUST NOT be
-    ///         hookable per ERC-8183 (and because the kernel guarantees that
-    ///         escape hatch is non-revertible), so {afterAction} cannot
-    ///         observe it. {markExpired} closes the resulting accounting gap
-    ///         so {setCommerce}'s `jobInflightCount == 0` requirement is
-    ///         actually reachable (audit L03).
+    /// @notice Reconcile a routed job that {afterAction} can never observe
+    ///         into Router-side bookkeeping.
+    /// @dev    Permissionless. Covers the two exits the kernel cannot report
+    ///         through a hook:
+    ///           - status `Expired`, reached via `claimRefund`, which MUST
+    ///             NOT be hookable per ERC-8183 (audit L03);
+    ///           - a registered job still `Open` past `expiredAt`. The kernel
+    ///             never auto-transitions `Open`, `claimRefund` rejects it and
+    ///             `fund` is closed after expiry, so the job is permanently
+    ///             dead and its counter slot must be reclaimable by anyone
+    ///             (audit L02).
+    ///         Without both, {setCommerce}'s `jobInflightCount == 0`
+    ///         requirement is unreachable and the `docs/design.md` §6 R6
+    ///         drain SOP cannot complete.
     function markExpired(uint256 jobId) external nonReentrant {
         RouterStorage storage $ = _router();
         if ($.jobPolicy[jobId] == address(0)) revert PolicyNotSet();
         IACP.Job memory job = $.commerce.getJob(jobId);
-        if (job.status != IACP.JobStatus.Expired) revert NotExpired();
+        bool abandoned = job.status == IACP.JobStatus.Open && block.timestamp >= job.expiredAt;
+        if (job.status != IACP.JobStatus.Expired && !abandoned) revert NotExpired();
 
         delete $.jobPolicy[jobId];
         unchecked {
             --$.jobInflightCount;
         }
-        emit JobFinalised(jobId, IACP.JobStatus.Expired);
+        emit JobFinalised(jobId, job.status);
     }
 
     // ---------------------------------------------------------------

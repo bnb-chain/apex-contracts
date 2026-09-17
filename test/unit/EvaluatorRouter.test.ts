@@ -585,5 +585,58 @@ describe("EvaluatorRouterUpgradeable", () => {
       await seedAndFundOpenJob(ctx);
       await assert.rejects(ctx.router.write.markExpired([1n]), /NotExpired/);
     });
+
+    // [L02] The kernel never auto-transitions Open, claimRefund rejects it
+    //       and fund closes at expiry, so a registered job abandoned in Open
+    //       has no terminal status to wait for. Without a reclaim path its
+    //       counter slot wedges setCommerce forever.
+    it("[L02] markExpired reclaims a job abandoned in Open past expiredAt", async () => {
+      const ctx = await setup();
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        ctx.router.address,
+        await futureTs(600),
+        "abandoned in Open",
+        ctx.router.address,
+      ]);
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
+      await routerAsClient.write.registerJob([1n, ctx.policy.address]);
+      assert.equal(await ctx.router.read.inflightJobCount(), 1n);
+
+      await advanceSeconds(viem, 700);
+
+      // Permissionless: reconciled by a third party, not the client who
+      // abandoned the job.
+      const routerAsOther = await asRouter(ctx.router.address, otherW);
+      await routerAsOther.write.markExpired([1n]);
+      assert.equal(await ctx.router.read.inflightJobCount(), 0n);
+      assert.equal(getAddress(await ctx.router.read.jobPolicy([1n])), getAddress(zeroAddress));
+
+      await ctx.router.write.pause();
+      await ctx.router.write.setCommerce([ctx.commerce.address]);
+    });
+
+    // [L02] An expired job can never be funded, so registering it would only
+    //       mint a counter slot that markExpired has to reclaim straight
+    //       away — including by re-registering one just reclaimed.
+    it("[L02] registerJob reverts JobExpired once the job is past expiredAt", async () => {
+      const ctx = await setup();
+      const commerceAsClient = await asCommerce(ctx.commerce.address, clientW);
+      await commerceAsClient.write.createJob([
+        provider,
+        ctx.router.address,
+        await futureTs(600),
+        "expired before register",
+        ctx.router.address,
+      ]);
+      await advanceSeconds(viem, 700);
+
+      const routerAsClient = await asRouter(ctx.router.address, clientW);
+      await assert.rejects(
+        routerAsClient.write.registerJob([1n, ctx.policy.address]),
+        /JobExpired/,
+      );
+    });
   });
 });

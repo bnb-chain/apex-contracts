@@ -356,7 +356,10 @@ expectedBudget` as front-running protection.
     `nonReentrant` (audit I06; defence-in-depth — current external
     surface is a `view`, but the guard locks in CEI for any future
     policy upgrade). Caller MUST be `commerce.jobs(jobId).client`. Job
-    MUST be Open. `job.evaluator == address(this)` and
+    MUST be Open and MUST NOT have passed `expiredAt` (audit L02 — an
+    expired job can never be funded, so registering it would only mint
+    a counter slot for `markExpired` to reclaim).
+    `job.evaluator == address(this)` and
     `job.hook == address(this)`. `policyWhitelist[policy] == true`.
     One-shot: `jobPolicy[jobId] == address(0)`. On success, increments
     `jobInflightCount` (audit L03).
@@ -368,11 +371,14 @@ expectedBudget` as front-running protection.
     - `verdict == 0 (Pending)` → revert `NotDecided`
     - any other value → revert `UnknownVerdict(verdict)`
   - `markExpired(uint256 jobId)` — permissionless, `nonReentrant`
-    (audit L03). Closes the bookkeeping gap left by the
-    non-hookable `claimRefund` path: reads `commerce.getJob(jobId)`,
-    requires `status == Expired`, then deletes `jobPolicy[jobId]` and
-    decrements `jobInflightCount`. Required before `setCommerce` can
-    succeed once any routed job has exited via `claimRefund`.
+    (audit L03 + L02). Closes the bookkeeping gaps that `afterAction`
+    cannot observe: reads `commerce.getJob(jobId)`, requires either
+    `status == Expired` (the non-hookable `claimRefund` exit) or
+    `status == Open && block.timestamp >= expiredAt` (a job abandoned
+    before funding, which the kernel never transitions on its own),
+    then deletes `jobPolicy[jobId]` and decrements
+    `jobInflightCount`. Required before `setCommerce` can succeed once
+    any routed job has exited through either path.
   - `beforeAction(jobId, selector, data)` — `IACPHook`. Requires
     `msg.sender == commerce`. On `fund` selector, enforces
     `jobPolicy[jobId] != 0` (prevents funding an unregistered job).
@@ -656,7 +662,7 @@ cannot be moved to a fresh contract.
    asymmetry exists so a Router bug does not cascade-revert unrelated
    `fund` / `submit` calls on the kernel; the universal client
    escape (`commerce.claimRefund`) is never pausable nor hookable.
-2. Wait for routed jobs to reach a terminal kernel status. Three
+2. Wait for routed jobs to reach a terminal kernel status. Four
    exit paths exist; the Router-side counter `jobInflightCount`
    tracks reconciliation:
    - **Settle (Approve / Reject)** — `router.settle(jobId, …)` (or
@@ -673,6 +679,13 @@ cannot be moved to a fresh contract.
      `commerce.reject(jobId, …)` while the job is still Open. The
      Router observes the terminal transition through
      `afterAction(reject)` and decrements automatically.
+   - **Abandoned in Open (audit L02)** — the client registers a job
+     and then neither funds nor cancels it. The kernel never moves
+     `Open` on its own, `claimRefund` rejects `Open` and `fund` closes
+     at `expiredAt`, so no hook fires and no other party can act. Once
+     `block.timestamp >= expiredAt` anyone calls
+     `router.markExpired(jobId)`; without this the counter would stay
+     non-zero forever and step 3 could never be reached.
 3. Once `router.inflightJobCount() == 0`, `router.setCommerce(...)`
    succeeds. Until that point, attempting to repoint the Router at
    a new kernel reverts `HasInflightJobs` — escrow on the old
