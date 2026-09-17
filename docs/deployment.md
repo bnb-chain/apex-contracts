@@ -1,8 +1,8 @@
 # APEX Deployment Runbook
 
 Operational guide for deploying APEX v1 to BSC Testnet / Mainnet, verifying
-the full stack on the block explorer, rotating `paymentToken`, and handing
-ownership to a production multisig. One command (`bun run deploy:<env>`)
+the full stack on the block explorer, managing the payment-token allowlist,
+and handing ownership to a production multisig. One command (`bun run deploy:<env>`)
 handles first deploys, implementation upgrades, and full-stack rotations;
 another (`bun run verify:<env>`) verifies every contract with zero manual
 arguments.
@@ -26,13 +26,14 @@ Every field is optional. `deploy.ts` reads the entry top-to-bottom with one
 cascading rule: **blank `paymentToken` triggers a full-stack rotation.** The
 rest of the fields decide reuse-vs-deploy independently:
 
-| Field           | Filled → reuse                                                                                                                        | Blank → deploy                                                                                                                                       |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `paymentToken`  | use that ERC-20                                                                                                                       | deploy fresh `ERC20MinimalMock` **and** force fresh Commerce + Router + Policy (cascade; `commerceProxy` / `routerProxy` are ignored in this branch) |
-| `treasury`      | passed into `commerce.initialize` on fresh path; logged only on reuse path                                                            | fall back to the deployer                                                                                                                            |
-| `commerceProxy` | keep proxy; deploy new impl + `upgradeToAndCall` **only if the compiled bytecode differs from the on-chain impl** (immutables masked) | deploy fresh impl + `ERC1967Proxy` + `initialize` **and** force fresh Router (so it doesn't dangle)                                                  |
-| `routerProxy`   | keep proxy; same bytecode-diff rule (requires Commerce was reused)                                                                    | deploy fresh impl + `ERC1967Proxy` + `initialize`                                                                                                    |
-| `policy`        | reuse if its bytecode matches the artifact **and** it points at this entry's commerce/router; otherwise rotate + whitelist            | deploy fresh + whitelist                                                                                                                             |
+| Field           | Filled → reuse                                                                                                                                            | Blank → deploy                                                                                                                                       |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `paymentToken`  | use that ERC-20 as the immutable default / pre-upgrade fallback token                                                                                     | deploy fresh `ERC20MinimalMock` **and** force fresh Commerce + Router + Policy (cascade; `commerceProxy` / `routerProxy` are ignored in this branch) |
+| `paymentTokens` | the complete desired allowlist for this network's Commerce (see §2.2); MUST be non-empty, unique, all deployed contracts, and MUST contain `paymentToken` | allowlist is initialised with `[paymentToken]` only — omission never implies USDC/USDT support and never re-enables a token governance disabled      |
+| `treasury`      | passed into `commerce.initialize` on fresh path; logged only on reuse path                                                                                | fall back to the deployer                                                                                                                            |
+| `commerceProxy` | keep proxy; deploy new impl + `upgradeToAndCall` **only if the compiled bytecode differs from the on-chain impl** (immutables masked)                     | deploy fresh impl + `ERC1967Proxy` + `initialize` **and** force fresh Router (so it doesn't dangle)                                                  |
+| `routerProxy`   | keep proxy; same bytecode-diff rule (requires Commerce was reused)                                                                                        | deploy fresh impl + `ERC1967Proxy` + `initialize`                                                                                                    |
+| `policy`        | reuse if its bytecode matches the artifact **and** it points at this entry's commerce/router; otherwise rotate + whitelist                                | deploy fresh + whitelist                                                                                                                             |
 
 `disputeWindow` / `initialQuorum` live in Policy immutables and are invisible
 to the bytecode diff — to rotate params without a code change, blank `policy`
@@ -133,6 +134,40 @@ and the owner executing the transaction, do **not** re-run `DEPLOY_YES=1` —
 it would deploy another impl and print fresh calldata, orphaning the first
 one. Run steps 2→4 as one sitting per upgrade.
 
+### 2.2 · Multi-token initialisation — not skippable
+
+Since the multi-token upgrade the kernel settles each job in the token bound
+to it at creation, and both `createJob` and any non-zero-budget `fund` check
+that token against an owner-curated allowlist. **The allowlist starts empty.**
+A Commerce that has been upgraded but never had `initializeMultiToken` run
+reverts `UnsupportedPaymentToken` on every `createJob` and on every `fund`
+with a budget — the contract is live but unusable.
+
+`deploy.ts` will not let that happen silently. It reads the `Initializable`
+version off the proxy and prints the state as `multi-token init:` in the
+plan. What it does depends on where the proxy is:
+
+| Situation                                      | What the script does                                                              | Who executes                  |
+| ---------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------- |
+| Fresh Commerce                                 | `initialize` via the proxy constructor, then a separate `initializeMultiToken` tx | deployer, directly            |
+| Existing proxy, impl bytecode differs          | `initializeMultiToken` calldata rides inside `upgradeToAndCall` — one atomic tx   | proxy owner (Safe on mainnet) |
+| Existing proxy, impl already current, not init | a standalone `initializeMultiToken` tx                                            | proxy owner (Safe on mainnet) |
+| Already initialised                            | nothing; falls through to allowlist reconciliation below                          | —                             |
+
+On the mainnet path this means the Safe may have **two** transactions to
+execute for one upgrade, not one. Check the printed list at the end of the
+run and execute all of it — a half-executed upgrade leaves the kernel in the
+unusable state above. Re-run the dry run afterwards; `multi-token init:` must
+report as complete.
+
+Once initialised, the allowlist is reconciled against `paymentTokens` on
+every run: tokens in the list that are not yet supported produce a
+`setPaymentTokenSupported(token, true)` call. Reconciliation is **additive
+only** — the script never disables a token that is absent from the list, so
+removing an entry from `paymentTokens` does not un-support it on-chain. To
+disable a token, send `setPaymentTokenSupported(token, false)` deliberately
+(see §4).
+
 ## 3 · Writing a V2 implementation safely
 
 `AgenticCommerceUpgradeable` and `EvaluatorRouterUpgradeable` are
@@ -205,16 +240,76 @@ retype any existing slot. It's the single most effective guardrail —
 even when §3.1 and §3.2 have been followed correctly, run the validator
 anyway.
 
-## 4 · Rotating `paymentToken`
+## 4 · Managing the payment-token allowlist
 
-`paymentToken` is set in `commerce.initialize` and has no setter. To rotate
-it, **clear `paymentToken` in `scripts/addresses.ts`** and re-run
-`bun run deploy:<env>`. The script deploys a brand-new `ERC20MinimalMock`
-(or, if you paste a real token address into `paymentToken` first, uses that
-instead), plus fresh Commerce + Router + Policy. The old Commerce / Router
-stay on-chain; any in-flight jobs against the old Commerce must drain via
-`oldCommerce.claimRefund(jobId)` after expiry (`claimRefund` is never
-pausable nor hookable).
+Adding or removing a settlement token no longer requires a redeploy. The
+allowlist is owner-gated state on the live Commerce:
+
+```solidity
+commerce.setPaymentTokenSupported(token, true);   // admit
+commerce.setPaymentTokenSupported(token, false);  // withdraw
+```
+
+The routine way to admit a token is to add it to `paymentTokens` in
+`scripts/addresses.ts` and re-run `bun run deploy:<env>`, which emits the
+call (or the Safe calldata) as part of the normal reconciliation described
+in §2.2. Withdrawal is never generated by the script and must be sent
+deliberately.
+
+`paymentToken` itself is still set once in `commerce.initialize` and has no
+setter, but it is now only the **default** token — what `createJob` picks
+when the caller does not name one via `createJobWithToken`, and what
+`jobPaymentToken` returns for jobs created before the multi-token upgrade.
+Rotating the default therefore still means a fresh Commerce + Router +
+Policy (clear `paymentToken` in `scripts/addresses.ts` and re-run the
+deploy; in-flight jobs on the old Commerce drain via
+`oldCommerce.claimRefund(jobId)` after expiry). For everything else —
+supporting a new stablecoin, dropping one — use the allowlist and leave the
+deployment alone.
+
+### 4.1 · Admission criteria
+
+The on-chain check in `setPaymentTokenSupported` only verifies that the
+address holds code. It cannot see token behaviour, so the class
+requirements documented on the `paymentToken` storage variable are entirely
+a deployer responsibility. Before admitting a token, confirm against its
+**verified source**, not its documentation, that it is a plain ERC-20:
+
+- `transfer` / `transferFrom` deliver exactly the requested amount — no
+  fee-on-transfer, reflection or deflationary mechanics;
+- no rebasing or elastic supply;
+- no blocklist or fee toggle that can change transfer semantics mid-job;
+- `balanceOf(address)` cannot decrease without an outgoing transfer from
+  that address;
+- if the token is upgradeable, its upgrade key is at least as trustworthy
+  as the Commerce owner, since it can retroactively introduce any of the
+  above.
+
+The kernel takes `job.budget` at face value and does not reconcile
+pre/post `balanceOf` in `fund`. A token that violates these assumptions
+causes silent escrow drift that surfaces as a revert at settlement:
+clients still recover escrow via `claimRefund` after `expiredAt`, but
+providers and the treasury cannot collect.
+
+### 4.2 · Withdrawing a token
+
+Withdrawal takes effect immediately and is not retroactive, which cuts both
+ways:
+
+- Jobs already `Funded` in that token settle and refund normally —
+  `complete`, `reject` and `claimRefund` do not re-check the allowlist, so
+  escrow already held is never stranded.
+- Jobs created in that token but **not yet funded** are stuck: `fund`
+  re-checks support and will revert `UnsupportedPaymentToken`. The client's
+  escape is `reject(jobId, …)`, which is client-callable while the job is
+  Open and costs nothing since no escrow was taken. A client who does
+  neither leaves the job to expire, and on the Router that job's
+  `jobInflightCount` slot is only reclaimed once someone calls
+  `router.markExpired(jobId)` after `expiredAt`.
+
+So when withdrawing a token under time pressure, announce it, and expect to
+run `router.markExpired` over the abandoned jobs afterwards if a Router
+migration is on the roadmap.
 
 ## 5 · Verify on the block explorer
 
@@ -262,6 +357,10 @@ After the multisig has accepted ownership, it MUST:
 2. Whitelist any additional policies via
    `router.setPolicyWhitelist(addr, true)` (the deployer-run policy is
    whitelisted automatically before ownership handoff).
+3. Confirm the payment-token allowlist matches intent —
+   `commerce.isPaymentTokenSupported(token)` for each entry in
+   `paymentTokens`, including `paymentToken` itself (§2.2). From here on,
+   admitting a token requires the multisig and the §4.1 criteria apply.
 
 ## 7 · QA environment (`bscTestnetQa`)
 

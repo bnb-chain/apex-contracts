@@ -44,6 +44,9 @@ interface IACP {
     ///         is evaluator-only per ERC-8183.
     function reject(uint256 jobId, bytes32 reason, bytes calldata optParams) external;
 
-    /// @notice Escrow / fee token used by this kernel.
+    /// @notice Default escrow / settlement token and compatibility fallback
+    ///         for jobs created before the multi-token upgrade.
     function paymentToken() external view returns (address);
+
+    function jobPaymentToken(uint256 jobId) external view returns (address);
 }

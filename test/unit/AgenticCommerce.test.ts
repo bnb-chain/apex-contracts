@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { network } from "hardhat";
-import { getAddress, keccak256, parseEventLogs, toBytes, zeroAddress } from "viem";
+import {
+  encodeAbiParameters,
+  getAddress,
+  keccak256,
+  parseAbiParameters,
+  parseEventLogs,
+  toBytes,
+  toFunctionSelector,
+  zeroAddress,
+} from "viem";
 
 import {
   JobStatus,
@@ -10,6 +19,7 @@ import {
   deployCommerce,
   deployMockToken,
   deployNoopHook,
+  deployRouter,
   blockTimestamp,
   advanceSeconds,
 } from "./helpers.js";
@@ -17,7 +27,7 @@ import {
 // Top-level await, NOT an async describe: bun's collector does not await an
 // async describe callback, so tests registered after its first `await` are
 // silently dropped when multiple test files load in parallel.
-const { viem } = await network.connect();
+const { viem, networkHelpers } = await network.connect();
 const publicClient = await viem.getPublicClient();
 
 const [deployerW, clientW, providerW, evaluatorW, treasuryW, otherW] =
@@ -36,13 +46,16 @@ const noopHook = await deployNoopHook(viem);
 const noopHookAddr = noopHook.address as `0x${string}`;
 
 describe("AgenticCommerceUpgradeable", () => {
-  async function setup() {
+  async function setup(initializeDefaultToken = true) {
     const token = await deployMockToken(viem);
     const { proxy, impl } = await deployCommerce(viem, {
       paymentToken: token.address,
       treasury,
       owner: deployer,
     });
+    if (initializeDefaultToken) {
+      await proxy.write.initializeMultiToken([[token.address]]);
+    }
     return { token, commerce: proxy, impl };
   }
 
@@ -60,7 +73,7 @@ describe("AgenticCommerceUpgradeable", () => {
 
   describe("initialize", () => {
     it("sets paymentToken, treasury, and owner", async () => {
-      const { token, commerce } = await setup();
+      const { token, commerce } = await setup(false);
       assert.equal(getAddress(await commerce.read.paymentToken()), getAddress(token.address));
       assert.equal(getAddress(await commerce.read.platformTreasury()), treasury);
       assert.equal(getAddress(await commerce.read.owner()), deployer);
@@ -96,10 +109,127 @@ describe("AgenticCommerceUpgradeable", () => {
     });
 
     it("disallows re-initialisation", async () => {
-      const { token, commerce } = await setup();
+      const { token, commerce } = await setup(false);
       await assert.rejects(
         commerce.write.initialize([token.address, treasury, deployer]),
         /InvalidInitialization/,
+      );
+    });
+  });
+
+  // ==================================================================
+  // Multi-token governance
+  // ==================================================================
+
+  describe("multi-token governance", () => {
+    it("owner enables the default token and two contract tokens, emitting each update", async () => {
+      const { token, commerce } = await setup(false);
+      const token2 = await deployMockToken(viem);
+      const token3 = await deployMockToken(viem);
+
+      const txHash = await commerce.write.initializeMultiToken([
+        [token.address, token2.address, token3.address],
+      ]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+      const updates = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "PaymentTokenSupportUpdated",
+      }) as unknown as Array<{ args: { token: `0x${string}`; supported: boolean } }>;
+
+      assert.equal(updates.length, 3);
+      assert.deepEqual(
+        updates.map((update) => [getAddress(update.args.token), update.args.supported]),
+        [
+          [getAddress(token.address), true],
+          [getAddress(token2.address), true],
+          [getAddress(token3.address), true],
+        ],
+      );
+      assert.equal(await commerce.read.isPaymentTokenSupported([token.address]), true);
+      assert.equal(await commerce.read.isPaymentTokenSupported([token2.address]), true);
+      assert.equal(await commerce.read.isPaymentTokenSupported([token3.address]), true);
+    });
+
+    it("rejects a non-owner multi-token initializer call", async () => {
+      const { token, commerce } = await setup(false);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+
+      await assert.rejects(
+        commerceAsClient.write.initializeMultiToken([[token.address]]),
+        /OwnableUnauthorizedAccount/,
+      );
+    });
+
+    it("requires the default token in the multi-token initializer", async () => {
+      const { commerce } = await setup(false);
+      const token2 = await deployMockToken(viem);
+
+      await assert.rejects(
+        commerce.write.initializeMultiToken([[token2.address]]),
+        /UnsupportedPaymentToken/,
+      );
+    });
+
+    it("rejects zero-address, EOA, and duplicate multi-token initializer entries", async () => {
+      const { token, commerce } = await setup(false);
+      const token2 = await deployMockToken(viem);
+      await assert.rejects(
+        commerce.write.initializeMultiToken([[token.address, zeroAddress]]),
+        /ZeroAddress/,
+      );
+
+      const { token: eoaToken, commerce: eoaCommerce } = await setup(false);
+      await assert.rejects(
+        eoaCommerce.write.initializeMultiToken([[eoaToken.address, other]]),
+        /TokenHasNoCode/,
+      );
+
+      const { token: duplicateToken, commerce: duplicateCommerce } = await setup(false);
+      await assert.rejects(
+        duplicateCommerce.write.initializeMultiToken([
+          [duplicateToken.address, token2.address, token2.address],
+        ]),
+        /UnsupportedPaymentToken/,
+      );
+    });
+
+    it("runs the multi-token reinitializer only once", async () => {
+      const { token, commerce } = await setup(false);
+      await commerce.write.initializeMultiToken([[token.address]]);
+
+      await assert.rejects(
+        commerce.write.initializeMultiToken([[token.address]]),
+        /InvalidInitialization/,
+      );
+    });
+
+    it("owner may disable a supported token", async () => {
+      const { token, commerce } = await setup();
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+
+      assert.equal(await commerce.read.isPaymentTokenSupported([token.address]), false);
+    });
+
+    it("owner may disable a supported token after its contract code disappears", async () => {
+      const { token, commerce } = await setup();
+      await networkHelpers.setCode(token.address, "0x");
+
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+
+      assert.equal(await commerce.read.isPaymentTokenSupported([token.address]), false);
+    });
+
+    it("still rejects a zero address on disable and an EOA on enable", async () => {
+      const { commerce } = await setup();
+
+      await assert.rejects(
+        commerce.write.setPaymentTokenSupported([zeroAddress, false]),
+        /ZeroAddress/,
+      );
+      await assert.rejects(
+        commerce.write.setPaymentTokenSupported([other, true]),
+        /TokenHasNoCode/,
       );
     });
   });
@@ -129,6 +259,145 @@ describe("AgenticCommerceUpgradeable", () => {
       assert.equal(getAddress(job.evaluator), evaluator);
       assert.equal(job.status, JobStatus.Open);
       assert.equal(job.budget, 0n);
+    });
+
+    it("binds the default token and emits JobPaymentTokenBound", async () => {
+      const { token, commerce } = await setup();
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      const txHash = await commerceAsClient.write.createJob([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "Default-token job",
+        noopHookAddr,
+      ]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+      const bindings = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "JobPaymentTokenBound",
+      }) as unknown as Array<{ args: { jobId: bigint; token: `0x${string}` } }>;
+
+      assert.equal(
+        getAddress(await commerce.read.jobPaymentToken([1n])),
+        getAddress(token.address),
+      );
+      assert.deepEqual(
+        bindings.map((binding) => binding.args.jobId),
+        [1n],
+      );
+      assert.equal(getAddress(bindings[0].args.token), getAddress(token.address));
+    });
+
+    it("binds an explicitly selected supported token and emits JobPaymentTokenBound", async () => {
+      const { commerce } = await setup();
+      const token2 = await deployMockToken(viem);
+      await commerce.write.setPaymentTokenSupported([token2.address, true]);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      const txHash = await commerceAsClient.write.createJobWithToken([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "Explicit-token job",
+        noopHookAddr,
+        token2.address,
+      ]);
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+      const bindings = parseEventLogs({
+        abi: commerce.abi,
+        logs: receipt.logs,
+        eventName: "JobPaymentTokenBound",
+      }) as unknown as Array<{ args: { jobId: bigint; token: `0x${string}` } }>;
+
+      assert.equal(
+        getAddress(await commerce.read.jobPaymentToken([1n])),
+        getAddress(token2.address),
+      );
+      assert.equal(bindings.length, 1);
+      assert.equal(bindings[0].args.jobId, 1n);
+      assert.equal(getAddress(bindings[0].args.token), getAddress(token2.address));
+    });
+
+    it("rejects createJobWithToken for an unsupported token", async () => {
+      const { commerce } = await setup();
+      const unsupportedToken = await deployMockToken(viem);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+
+      await assert.rejects(
+        commerceAsClient.write.createJobWithToken([
+          provider,
+          evaluator,
+          await futureTs(3600),
+          "Unsupported-token job",
+          noopHookAddr,
+          unsupportedToken.address,
+        ]),
+        /UnsupportedPaymentToken/,
+      );
+    });
+
+    it("rejects jobPaymentToken for a nonexistent job", async () => {
+      const { commerce } = await setup();
+      await assert.rejects(commerce.read.jobPaymentToken([1n]), /InvalidJob/);
+    });
+
+    it("uses the new selector with the Router hook while retaining its authenticated no-op", async () => {
+      const { commerce } = await setup();
+      const token2 = await deployMockToken(viem);
+      await commerce.write.setPaymentTokenSupported([token2.address, true]);
+      const { proxy: router } = await deployRouter(viem, {
+        commerce: commerce.address,
+        owner: deployer,
+      });
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+
+      await commerceAsClient.write.createJobWithToken([
+        provider,
+        router.address,
+        await futureTs(3600),
+        "Router-hook token job",
+        router.address,
+        token2.address,
+      ]);
+
+      assert.equal(
+        getAddress(await commerce.read.jobPaymentToken([1n])),
+        getAddress(token2.address),
+      );
+    });
+
+    it("binds the selected token before the createJobWithToken after-hook callback", async () => {
+      const { commerce } = await setup();
+      const token2 = await deployMockToken(viem);
+      await commerce.write.setPaymentTokenSupported([token2.address, true]);
+      const observer = await viem.deployContract("PaymentTokenBindingObserverHook", [
+        commerce.address,
+      ]);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+
+      await commerceAsClient.write.createJobWithToken([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "Observed-token job",
+        observer.address,
+        token2.address,
+      ]);
+
+      assert.equal(getAddress(await observer.read.callbackToken()), getAddress(token2.address));
+      assert.equal(
+        await observer.read.lastSelector(),
+        toFunctionSelector("createJobWithToken(address,address,uint256,string,address,address)"),
+      );
+      assert.equal(
+        await observer.read.lastData(),
+        encodeAbiParameters(parseAbiParameters("address, address, address, address"), [
+          client,
+          provider,
+          evaluator,
+          token2.address,
+        ]),
+      );
     });
 
     it("rejects zero evaluator", async () => {
@@ -535,6 +804,254 @@ describe("AgenticCommerceUpgradeable", () => {
   });
 
   // ==================================================================
+  // Bound-token escrow and settlement
+  // ==================================================================
+
+  describe("bound-token escrow and settlement", () => {
+    async function fundExplicitTokenJob(decimals: number, budget: bigint) {
+      const { token: defaultToken, commerce } = await setup();
+      const token = await deployMockToken(viem, decimals);
+      await commerce.write.setPaymentTokenSupported([token.address, true]);
+
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJobWithToken([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "Bound-token job",
+        noopHookAddr,
+        token.address,
+      ]);
+      await commerceAsClient.write.setBudget([1n, budget, "0x"]);
+      await token.write.mint([client, budget]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, budget]);
+      await commerceAsClient.write.fund([1n, budget, "0x"]);
+
+      return { defaultToken, token, commerce, budget };
+    }
+
+    it("settles a 6-decimal bound token to provider and treasury", async () => {
+      const budget = 1_000_000n;
+      const { defaultToken, token, commerce } = await fundExplicitTokenJob(6, budget);
+      await commerce.write.setPlatformFee([250n, treasury]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.submit([1n, keccak256(toBytes("six-decimal")), "0x"]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
+
+      assert.equal(await token.read.balanceOf([client]), 0n);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal(await token.read.balanceOf([provider]), 975_000n);
+      assert.equal(await token.read.balanceOf([treasury]), 25_000n);
+      assert.equal(await defaultToken.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("refunds a 18-decimal bound token when rejected while Funded", async () => {
+      const { defaultToken, token, commerce, budget } = await fundExplicitTokenJob(
+        18,
+        DEFAULT_BUDGET,
+      );
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
+
+      assert.equal(await token.read.balanceOf([client]), budget);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+      assert.equal(await defaultToken.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("refunds a 6-decimal bound token when rejected while Submitted", async () => {
+      const budget = 1_000_000n;
+      const { defaultToken, token, commerce } = await fundExplicitTokenJob(6, budget);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.submit([1n, keccak256(toBytes("reject-six")), "0x"]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
+
+      assert.equal(await token.read.balanceOf([client]), budget);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+      assert.equal(await defaultToken.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("refunds an expired 18-decimal bound token", async () => {
+      const { defaultToken, token, commerce, budget } = await fundExplicitTokenJob(
+        18,
+        DEFAULT_BUDGET,
+      );
+      await advanceSeconds(viem, 3700);
+      await commerce.write.claimRefund([1n]);
+
+      assert.equal(await token.read.balanceOf([client]), budget);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+      assert.equal(await defaultToken.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("rejects a default-token job after the default token is disabled", async () => {
+      const { token, commerce } = await setup();
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+
+      await assert.rejects(
+        commerceAsClient.write.createJob([
+          provider,
+          evaluator,
+          await futureTs(3600),
+          "Disabled default-token job",
+          noopHookAddr,
+        ]),
+        /UnsupportedPaymentToken/,
+      );
+    });
+
+    it("rejects funding a paid Open job after its bound token is disabled", async () => {
+      const { token: defaultToken, commerce } = await setup();
+      const token = await deployMockToken(viem, 6);
+      const budget = 1_000_000n;
+      await commerce.write.setPaymentTokenSupported([token.address, true]);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJobWithToken([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "Disabled paid job",
+        noopHookAddr,
+        token.address,
+      ]);
+      await commerceAsClient.write.setBudget([1n, budget, "0x"]);
+      await token.write.mint([client, budget]);
+      const tokenAsClient = await viem.getContractAt("ERC20MinimalMock", token.address, {
+        client: { wallet: clientW },
+      });
+      await tokenAsClient.write.approve([commerce.address, budget]);
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+
+      await assert.rejects(
+        commerceAsClient.write.fund([1n, budget, "0x"]),
+        /UnsupportedPaymentToken/,
+      );
+      assert.equal(await token.read.balanceOf([client]), budget);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal(await defaultToken.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("settles a funded bound token after it is disabled", async () => {
+      const { token, commerce, budget } = await fundExplicitTokenJob(18, DEFAULT_BUDGET);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.submit([1n, keccak256(toBytes("disabled-complete")), "0x"]);
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
+      assert.equal(await token.read.balanceOf([provider]), budget);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("rejects a Funded bound-token job after it is disabled", async () => {
+      const { token, commerce, budget } = await fundExplicitTokenJob(6, 1_000_000n);
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
+      assert.equal(await token.read.balanceOf([client]), budget);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("rejects a Submitted bound-token job after it is disabled", async () => {
+      const { token, commerce, budget } = await fundExplicitTokenJob(6, 1_000_000n);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.submit([1n, keccak256(toBytes("disabled-reject")), "0x"]);
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
+      assert.equal(await token.read.balanceOf([client]), budget);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("refunds an expired bound-token job after it is disabled", async () => {
+      const { token, commerce, budget } = await fundExplicitTokenJob(18, DEFAULT_BUDGET);
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+      await advanceSeconds(viem, 3700);
+      await commerce.write.claimRefund([1n]);
+
+      assert.equal(await token.read.balanceOf([client]), budget);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+    });
+
+    async function createDisabledZeroBudgetJob() {
+      const { token: defaultToken, commerce } = await setup();
+      const token = await deployMockToken(viem, 6);
+      await commerce.write.setPaymentTokenSupported([token.address, true]);
+      const commerceAsClient = await asCommerce(commerce.address, clientW);
+      await commerceAsClient.write.createJobWithToken([
+        provider,
+        evaluator,
+        await futureTs(3600),
+        "Disabled free job",
+        noopHookAddr,
+        token.address,
+      ]);
+      await commerceAsClient.write.setBudget([1n, 0n, "0x"]);
+      await commerce.write.setPaymentTokenSupported([token.address, false]);
+      return { defaultToken, token, commerce, commerceAsClient };
+    }
+
+    it("funds and completes a disabled zero-budget job without token transfers", async () => {
+      const { defaultToken, token, commerce, commerceAsClient } =
+        await createDisabledZeroBudgetJob();
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+      const commerceAsProvider = await asCommerce(commerce.address, providerW);
+      await commerceAsProvider.write.submit([1n, keccak256(toBytes("disabled-free")), "0x"]);
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.complete([1n, ZERO_BYTES32, "0x"]);
+
+      assert.equal(await token.read.balanceOf([client]), 0n);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+      assert.equal(await defaultToken.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("funds and rejects a disabled zero-budget job without token transfers", async () => {
+      const { defaultToken, token, commerce, commerceAsClient } =
+        await createDisabledZeroBudgetJob();
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+      const commerceAsEvaluator = await asCommerce(commerce.address, evaluatorW);
+      await commerceAsEvaluator.write.reject([1n, ZERO_BYTES32, "0x"]);
+
+      assert.equal(await token.read.balanceOf([client]), 0n);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+      assert.equal(await defaultToken.read.balanceOf([commerce.address]), 0n);
+    });
+
+    it("expires a disabled zero-budget job without token transfers", async () => {
+      const { defaultToken, token, commerce, commerceAsClient } =
+        await createDisabledZeroBudgetJob();
+      await commerceAsClient.write.fund([1n, 0n, "0x"]);
+      await advanceSeconds(viem, 3700);
+      await commerce.write.claimRefund([1n]);
+
+      assert.equal(await token.read.balanceOf([client]), 0n);
+      assert.equal(await token.read.balanceOf([commerce.address]), 0n);
+      assert.equal(await token.read.balanceOf([provider]), 0n);
+      assert.equal(await token.read.balanceOf([treasury]), 0n);
+      assert.equal(await defaultToken.read.balanceOf([commerce.address]), 0n);
+    });
+  });
+
+  // ==================================================================
   // claimRefund
   // ==================================================================
 
@@ -547,6 +1064,7 @@ describe("AgenticCommerceUpgradeable", () => {
         treasury,
         owner: deployer,
       });
+      await commerce.write.initializeMultiToken([[token.address]]);
       const commerceAsClient = await asCommerce(commerce.address, clientW);
       const expiredAt = await futureTs(3600);
       await commerceAsClient.write.createJob([provider, evaluator, expiredAt, "", noopHookAddr]);

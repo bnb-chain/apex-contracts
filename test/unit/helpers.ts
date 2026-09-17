@@ -31,10 +31,10 @@ export const ZERO_BYTES32 =
   "0x0000000000000000000000000000000000000000000000000000000000000000" as const;
 
 /**
- * Deploy a fresh ERC20MinimalMock with 18 decimals.
+ * Deploy a fresh ERC20MinimalMock with configurable decimals.
  */
-export async function deployMockToken(viem: any) {
-  return viem.deployContract("ERC20MinimalMock", ["Test Token", "TEST", 18]);
+export async function deployMockToken(viem: any, decimals = 18) {
+  return viem.deployContract("ERC20MinimalMock", ["Test Token", "TEST", decimals]);
 }
 
 /**
@@ -128,6 +128,7 @@ export async function deployStack(
     treasury: opts.treasury,
     owner: opts.owner,
   });
+  await commerce.write.initializeMultiToken([[token.address]]);
   const { proxy: router } = await deployRouter(viem, {
     commerce: commerce.address,
     owner: opts.owner,

@@ -3,8 +3,20 @@ import { encodeFunctionData, getAddress, parseUnits } from "viem";
 import { ADDRESSES } from "./addresses.js";
 import {
   ERC20_MOCK_CONSTRUCTOR_ARGS,
-  commerceInitCalldata,
+  INITIALIZABLE_STORAGE_SLOT,
+  canReportDeploymentDone,
+  commerceInitPlanSummary,
+  deployFreshCommerce,
+  executeCommerceDeployment,
+  executePaymentTokenReconciliation,
+  isDeploymentNoop,
+  multiTokenInitStatus,
+  planCommerceDeployment,
+  readConfiguredPaymentTokenSupport,
+  resolvePaymentTokens,
   routerInitCalldata,
+  validatePaymentTokens,
+  waitForSuccessfulTransaction,
 } from "./lib/apex-init.js";
 
 /**
@@ -42,7 +54,8 @@ import {
  * are masked out of the comparison — to rotate params without a code change,
  * blank cfg.policy in scripts/addresses.ts to force a redeploy.
  *
- * Owner-gated calls (upgradeToAndCall, setPolicyWhitelist):
+ * Owner-gated calls (initializeMultiToken, upgradeToAndCall,
+ * setPaymentTokenSupported, setPolicyWhitelist):
  *   - proxy owner == signer → sent directly.
  *   - otherwise (multisig / another EOA) → NOT sent; the exact Safe
  *     transaction (to / value / data) is printed at the end for the owner to
@@ -59,7 +72,13 @@ import {
  *
  * Invariants (reuse paths only):
  *   - commerce.paymentToken() MUST equal cfg.paymentToken. paymentToken is
- *     immutable on Commerce — a mismatch means cfg is inconsistent.
+ *     the immutable default / backwards-compatible token — a mismatch means
+ *     cfg is inconsistent.
+ *   - cfg.paymentTokens, when present, MUST be non-empty, unique, and contain
+ *     cfg.paymentToken. When omitted, the initializer uses only paymentToken;
+ *     omission never implies USDC / USDT support or re-enables a default token
+ *     deliberately disabled by governance. An explicit v2 list is reconciled
+ *     additively: each entry is checked and only inactive entries are enabled.
  *   - router.commerce() MUST equal the Commerce we're using this run.
  *
  * Side effects:
@@ -131,6 +150,20 @@ async function readImplementation(
   return impl;
 }
 
+async function waitForSuccessfulPublicTransaction(
+  publicClient: PublicClient,
+  hash: `0x${string}`,
+  action: string,
+  verify?: () => Promise<boolean>,
+): Promise<void> {
+  await waitForSuccessfulTransaction({
+    hash,
+    action,
+    waitForTransactionReceipt: (args) => publicClient.waitForTransactionReceipt(args),
+    verify,
+  });
+}
+
 async function main(): Promise<void> {
   const { viem, networkName } = await network.connect();
   const publicClient = await viem.getPublicClient();
@@ -139,6 +172,7 @@ async function main(): Promise<void> {
 
   const execute = process.argv.includes("--yes") || process.env.DEPLOY_YES === "1";
   const cfg = ADDRESSES[networkName] ?? {};
+  const configuredPaymentTokens = resolvePaymentTokens(cfg);
   const owner = deployer;
   const disputeWindow = BigInt(env("DISPUTE_WINDOW_SECONDS", "259200"));
   const initialQuorum = Number(env("INITIAL_QUORUM", "3"));
@@ -159,6 +193,8 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------------
   let commerceAction: Action = "FRESH";
   let commerceOwner: `0x${string}` | null = null; // null → fresh (owner = deployer)
+  let commerceMultiTokenInit: "required" | "complete" = "required";
+  let paymentTokenSupport: Awaited<ReturnType<typeof readConfiguredPaymentTokenSupport>>;
   if (!freshCommerce) {
     const proxyAddr = cfg.commerceProxy!;
     const commerceHandle = await viem.getContractAt("AgenticCommerceUpgradeable", proxyAddr);
@@ -172,10 +208,32 @@ async function main(): Promise<void> {
       );
     }
     commerceOwner = await commerceHandle.read.owner();
+    commerceMultiTokenInit = multiTokenInitStatus(
+      await publicClient.getStorageAt({
+        address: proxyAddr,
+        slot: INITIALIZABLE_STORAGE_SLOT,
+      }),
+    );
+    if (cfg.paymentTokens !== undefined && commerceMultiTokenInit === "complete") {
+      paymentTokenSupport = await readConfiguredPaymentTokenSupport({
+        paymentToken: cfg.paymentToken,
+        paymentTokens: cfg.paymentTokens,
+        readCode: async (token) => publicClient.getCode({ address: token }),
+        readPaymentTokenSupported: async (token) =>
+          commerceHandle.read.isPaymentTokenSupported([token]),
+      });
+    }
     const impl = await readImplementation(publicClient, proxyAddr);
     commerceAction = (await codeMatchesArtifact(publicClient, impl, "AgenticCommerceUpgradeable"))
       ? "up-to-date"
       : "UPGRADE";
+  }
+  if (freshCommerce || commerceMultiTokenInit === "required") {
+    await validatePaymentTokens({
+      paymentToken: cfg.paymentToken,
+      paymentTokens: cfg.paymentTokens,
+      readCode: async (token) => publicClient.getCode({ address: token }),
+    });
   }
 
   let routerAction: Action = "FRESH";
@@ -219,6 +277,19 @@ async function main(): Promise<void> {
     proxyOwner === null || sameAddr(proxyOwner, deployer)
       ? "direct"
       : `owner ${proxyOwner} — calldata only`;
+  const commercePlan = planCommerceDeployment({
+    freshCommerce,
+    commerceAction,
+    initStatus: commerceMultiTokenInit,
+    ownerExecutor:
+      commerceOwner === null || sameAddr(commerceOwner, deployer)
+        ? { kind: "direct" }
+        : { kind: "calldata-only", owner: commerceOwner },
+    paymentToken: cfg.paymentToken,
+    paymentTokens: cfg.paymentTokens,
+    paymentTokenSupport,
+    commerceProxy: cfg.commerceProxy,
+  });
 
   console.log(`\n=== APEX v1 deploy ===`);
   console.log(`Network : ${networkName}`);
@@ -230,6 +301,30 @@ async function main(): Promise<void> {
   console.log(`Quorum  : ${initialQuorum}`);
   console.log(`Plan    :`);
   console.log(`  paymentToken : ${freshPaymentToken ? "FRESH" : `reuse ${cfg.paymentToken}`}`);
+  console.log(
+    `  paymentTokens: ${
+      configuredPaymentTokens === undefined
+        ? "FRESH mock (default only)"
+        : configuredPaymentTokens.join(", ")
+    }`,
+  );
+  console.log(`  multi-token init: ${commerceInitPlanSummary(commercePlan)}`);
+  const paymentTokenReconciliation = commercePlan.paymentTokenReconciliation;
+  if (paymentTokenReconciliation.state === "not-configured") {
+    console.log(`  payment-token reconciliation: not configured (no explicit paymentTokens)`);
+  } else if (paymentTokenReconciliation.state === "verified") {
+    console.log(`  payment-token reconciliation: verified`);
+  } else if (paymentTokenReconciliation.action === "initializer") {
+    console.log(`  payment-token reconciliation: required via initializeMultiToken`);
+  } else if (paymentTokenReconciliation.state === "required") {
+    console.log(
+      `  payment-token reconciliation: required (${paymentTokenReconciliation.missingPaymentTokens.join(
+        ", ",
+      )})`,
+    );
+  } else {
+    console.log(`  payment-token reconciliation: unverified — execution blocked`);
+  }
   console.log(
     `  commerce     : ${commerceAction}` +
       (commerceAction === "UPGRADE" ? ` (${executorOf(commerceOwner)})` : ""),
@@ -251,81 +346,157 @@ async function main(): Promise<void> {
     );
   }
 
-  const nothingToDo =
-    !freshPaymentToken &&
-    commerceAction === "up-to-date" &&
-    routerAction === "up-to-date" &&
-    policyAction === "up-to-date";
+  const nothingToDo = isDeploymentNoop({
+    freshPaymentToken,
+    commerceAction,
+    commerceInitStatus: commerceMultiTokenInit,
+    routerAction,
+    policyAction,
+    paymentTokenReconciliation: commercePlan.paymentTokenReconciliation.state,
+  });
   if (nothingToDo) {
     console.log(`\nEverything is up-to-date — nothing to do.\n`);
     return;
+  }
+  // ------------------------------------------------------------------------
+  // Commerce executor. In dry-run it consumes the same plan and invokes no
+  // deploy, write, or queue callback; the script returns immediately after.
+  // ------------------------------------------------------------------------
+
+  // 1. paymentToken --------------------------------------------------------
+  let paymentToken = cfg.paymentToken;
+  if (execute && freshPaymentToken) {
+    console.log(`\n[1/5] paymentToken: deploying ERC20MinimalMock ...`);
+    const token = await viem.deployContract("ERC20MinimalMock", [...ERC20_MOCK_CONSTRUCTOR_ARGS]);
+    paymentToken = token.address;
+    await token.write.mint([deployer, parseUnits("1000000", 18)]);
+    console.log(`      addr : ${paymentToken} (minted 1,000,000 APT to deployer)`);
+  } else if (execute) {
+    console.log(`\n[1/5] paymentToken (reused): ${paymentToken}`);
+  }
+
+  // 2. treasury ------------------------------------------------------------
+  const treasury = cfg.treasury ?? deployer;
+  if (execute) {
+    console.log(`\n[2/5] treasury: ${treasury}${cfg.treasury ? "" : " (deployer fallback)"}`);
+  }
+
+  // 3. Commerce ------------------------------------------------------------
+  let commerce:
+    | Awaited<ReturnType<typeof viem.getContractAt<"AgenticCommerceUpgradeable">>>
+    | undefined;
+  let commerceImplAddr: `0x${string}` | null = null; // non-null → changed this run
+  if (execute && !freshCommerce) {
+    commerce = await viem.getContractAt("AgenticCommerceUpgradeable", cfg.commerceProxy!);
+    if (commerceAction === "up-to-date") {
+      console.log(`\n[3/5] Commerce implementation: up-to-date (proxy ${commerce.address})`);
+    } else {
+      console.log(`\n[3/5] Commerce: reusing proxy ${commerce.address}`);
+    }
+  }
+  const commerceArtifact = await hre.artifacts.readArtifact("AgenticCommerceUpgradeable");
+  await executeCommerceDeployment({
+    plan: commercePlan,
+    execute,
+    abi: commerceArtifact.abi,
+    paymentToken,
+    callbacks: {
+      deployFresh: async ({ paymentTokens, proxyInitializer }) => {
+        console.log(`\n[3/5] Commerce: deploying fresh impl + proxy ...`);
+        const fresh = await deployFreshCommerce({
+          abi: commerceArtifact.abi,
+          paymentToken: paymentToken!,
+          treasury,
+          owner,
+          paymentTokens,
+          callbacks: {
+            deployImplementation: async () => {
+              const impl = await viem.deployContract("AgenticCommerceUpgradeable", []);
+              return impl.address;
+            },
+            deployProxy: async ({ constructorArgs }) => {
+              const proxy = await viem.deployContract("ERC1967Proxy", [...constructorArgs]);
+              return proxy.address;
+            },
+            writeInitializeMultiToken: async ({ proxy, paymentTokens: tokens }) => {
+              commerce = await viem.getContractAt("AgenticCommerceUpgradeable", proxy);
+              const txHash = await commerce.write.initializeMultiToken([tokens]);
+              await waitForSuccessfulPublicTransaction(
+                publicClient,
+                txHash,
+                "commerce.initializeMultiToken",
+              );
+              return txHash;
+            },
+          },
+        });
+        commerceImplAddr = fresh.implementation;
+        console.log(`      proxy initializer: ${proxyInitializer}`);
+        console.log(`      impl : ${fresh.implementation}`);
+        console.log(`      proxy: ${fresh.proxy}`);
+        console.log(`      initializeMultiToken calldata: ${fresh.multiTokenInitData}`);
+        console.log(`      initializeMultiToken tx      : ${fresh.initializeTransaction}`);
+      },
+      deployImplementation: async () => {
+        const impl = await viem.deployContract("AgenticCommerceUpgradeable", []);
+        commerceImplAddr = impl.address;
+        console.log(`      new impl : ${impl.address}`);
+        return impl.address;
+      },
+      writeUpgrade: async ({ implementation, callData }) => {
+        const txHash = await commerce!.write.upgradeToAndCall([implementation, callData]);
+        await waitForSuccessfulPublicTransaction(publicClient, txHash, "commerce.upgradeToAndCall");
+        console.log(`      upgradeToAndCall tx: ${txHash}`);
+      },
+      writeInitialize: async ({ paymentTokens }) => {
+        const txHash = await commerce!.write.initializeMultiToken([paymentTokens]);
+        await waitForSuccessfulPublicTransaction(
+          publicClient,
+          txHash,
+          "commerce.initializeMultiToken",
+        );
+        console.log(`      initializeMultiToken tx: ${txHash}`);
+      },
+      queueOwnerTransaction: (tx) => {
+        pendingOwnerTxs.push(tx);
+        console.log(`      ${tx.label} queued for owner ${commerceOwner} (see below)`);
+      },
+    },
+  });
+  const paymentTokenReconciliationExecution = await executePaymentTokenReconciliation({
+    plan: commercePlan,
+    execute,
+    abi: commerceArtifact.abi,
+    paymentToken,
+    callbacks: {
+      readPaymentTokenSupported: async (token) => commerce!.read.isPaymentTokenSupported([token]),
+      writeSetPaymentTokenSupported: async ({ token }) => {
+        const txHash = await commerce!.write.setPaymentTokenSupported([token, true]);
+        await waitForSuccessfulPublicTransaction(
+          publicClient,
+          txHash,
+          "commerce.setPaymentTokenSupported",
+        );
+        console.log(`      setPaymentTokenSupported(${token}, true) tx: ${txHash}`);
+      },
+      queueOwnerTransaction: (tx) => {
+        pendingOwnerTxs.push(tx);
+        console.log(`      ${tx.label} queued for owner ${commerceOwner} (see below)`);
+      },
+    },
+  });
+  if (paymentTokenReconciliationExecution.action === "queued") {
+    console.log(`      payment-token reconciliation: queued; verification pending`);
+  } else if (paymentTokenReconciliationExecution.action === "executed") {
+    console.log(`      payment-token reconciliation: executed; verified`);
   }
   if (!execute) {
     console.log(`\nDry run — no transactions sent.`);
     console.log(`Re-run with --yes (or DEPLOY_YES=1) to execute the plan above.\n`);
     return;
   }
-
-  // ------------------------------------------------------------------------
-  // Execute phase.
-  // ------------------------------------------------------------------------
-
-  // 1. paymentToken --------------------------------------------------------
-  let paymentToken: `0x${string}`;
-  if (freshPaymentToken) {
-    console.log(`\n[1/5] paymentToken: deploying ERC20MinimalMock ...`);
-    const token = await viem.deployContract("ERC20MinimalMock", [...ERC20_MOCK_CONSTRUCTOR_ARGS]);
-    paymentToken = token.address;
-    await token.write.mint([deployer, parseUnits("1000000", 18)]);
-    console.log(`      addr : ${paymentToken} (minted 1,000,000 APT to deployer)`);
-  } else {
-    paymentToken = cfg.paymentToken!;
-    console.log(`\n[1/5] paymentToken (reused): ${paymentToken}`);
-  }
-
-  // 2. treasury ------------------------------------------------------------
-  const treasury = cfg.treasury ?? deployer;
-  console.log(`\n[2/5] treasury: ${treasury}${cfg.treasury ? "" : " (deployer fallback)"}`);
-
-  // 3. Commerce ------------------------------------------------------------
-  let commerce: Awaited<ReturnType<typeof viem.getContractAt<"AgenticCommerceUpgradeable">>>;
-  let commerceImplAddr: `0x${string}` | null = null; // non-null → changed this run
-
-  if (freshCommerce) {
-    console.log(`\n[3/5] Commerce: deploying fresh impl + proxy ...`);
-    const impl = await viem.deployContract("AgenticCommerceUpgradeable", []);
-    const initData = commerceInitCalldata(impl.abi, { paymentToken, treasury, owner });
-    const proxy = await viem.deployContract("ERC1967Proxy", [impl.address, initData]);
-    commerce = await viem.getContractAt("AgenticCommerceUpgradeable", proxy.address);
-    commerceImplAddr = impl.address;
-    console.log(`      impl : ${impl.address}`);
-    console.log(`      proxy: ${commerce.address}`);
-  } else {
-    commerce = await viem.getContractAt("AgenticCommerceUpgradeable", cfg.commerceProxy!);
-    if (commerceAction === "up-to-date") {
-      console.log(`\n[3/5] Commerce: up-to-date — skipped (proxy ${commerce.address})`);
-    } else {
-      console.log(`\n[3/5] Commerce: reusing proxy ${commerce.address}`);
-      const impl = await viem.deployContract("AgenticCommerceUpgradeable", []);
-      commerceImplAddr = impl.address;
-      console.log(`      new impl : ${impl.address}`);
-      const data = encodeFunctionData({
-        abi: commerce.abi,
-        functionName: "upgradeToAndCall",
-        args: [impl.address, "0x"],
-      });
-      if (sameAddr(commerceOwner!, deployer)) {
-        const txHash = await commerce.write.upgradeToAndCall([impl.address, "0x"]);
-        console.log(`      upgradeToAndCall tx: ${txHash}`);
-      } else {
-        pendingOwnerTxs.push({
-          label: `commerce.upgradeToAndCall(${impl.address}, "0x")`,
-          to: commerce.address,
-          data,
-        });
-        console.log(`      upgradeToAndCall queued for owner ${commerceOwner} (see below)`);
-      }
-    }
+  if (commerce === undefined || paymentToken === undefined) {
+    throw new Error("Commerce execution completed without deployed addresses");
   }
 
   // 4. Router --------------------------------------------------------------
@@ -348,7 +519,6 @@ async function main(): Promise<void> {
     } else {
       console.log(`\n[4/5] Router: reusing proxy ${router.address}`);
       const impl = await viem.deployContract("EvaluatorRouterUpgradeable", []);
-      routerImplAddr = impl.address;
       console.log(`      new impl : ${impl.address}`);
       const data = encodeFunctionData({
         abi: router.abi,
@@ -357,8 +527,17 @@ async function main(): Promise<void> {
       });
       if (sameAddr(routerOwner!, deployer)) {
         const txHash = await router.write.upgradeToAndCall([impl.address, "0x"]);
+        await waitForSuccessfulPublicTransaction(
+          publicClient,
+          txHash,
+          "router.upgradeToAndCall",
+          async () =>
+            sameAddr(await readImplementation(publicClient, router.address), impl.address),
+        );
+        routerImplAddr = impl.address;
         console.log(`      upgradeToAndCall tx: ${txHash}`);
       } else {
+        routerImplAddr = impl.address;
         pendingOwnerTxs.push({
           label: `router.upgradeToAndCall(${impl.address}, "0x")`,
           to: router.address,
@@ -382,12 +561,19 @@ async function main(): Promise<void> {
       disputeWindow,
       initialQuorum,
     ]);
-    policyAddr = policy.address;
     console.log(`      addr : ${policy.address}`);
     if (routerOwner === null || sameAddr(routerOwner, deployer)) {
-      await router.write.setPolicyWhitelist([policy.address, true]);
+      const txHash = await router.write.setPolicyWhitelist([policy.address, true]);
+      await waitForSuccessfulPublicTransaction(
+        publicClient,
+        txHash,
+        "router.setPolicyWhitelist",
+        async () => router.read.policyWhitelist([policy.address]),
+      );
+      policyAddr = policy.address;
       console.log(`      whitelisted on router ${router.address}`);
     } else {
+      policyAddr = policy.address;
       pendingOwnerTxs.push({
         label: `router.setPolicyWhitelist(${policy.address}, true)`,
         to: router.address,
@@ -404,11 +590,30 @@ async function main(): Promise<void> {
   // ----------------------------------------------------------------------
   // Output
   // ----------------------------------------------------------------------
-  console.log(`\n=== DONE ===\n`);
+  const paymentTokenReconciliationPending =
+    paymentTokenReconciliationExecution.verification === "pending";
+  const deploymentCanReportDone = canReportDeploymentDone({
+    paymentTokenVerification: paymentTokenReconciliationExecution.verification,
+    pendingOwnerTransactionCount: pendingOwnerTxs.length,
+  });
+  console.log(
+    deploymentCanReportDone
+      ? `\n=== DONE ===\n`
+      : paymentTokenReconciliationPending
+        ? `\n=== OWNER ACTIONS PENDING — PAYMENT TOKENS NOT VERIFIED ===\n`
+        : `\n=== OWNER ACTIONS PENDING — OWNER TRANSACTIONS NOT EXECUTED ===\n`,
+  );
 
   console.log(`Paste the following into ADDRESSES["${networkName}"] in scripts/addresses.ts`);
   console.log(`(only the fields that changed this run are listed):\n`);
   if (freshPaymentToken) console.log(`    paymentToken:  "${paymentToken}",`);
+  if (freshPaymentToken || (commerceMultiTokenInit === "required" && !cfg.paymentTokens)) {
+    const paymentTokens = resolvePaymentTokens({
+      paymentToken,
+      paymentTokens: cfg.paymentTokens,
+    })!;
+    console.log(`    paymentTokens: [${paymentTokens.map((token) => `"${token}"`).join(", ")}],`);
+  }
   if (freshCommerce) console.log(`    commerceProxy: "${commerce.address}",`);
   if (commerceImplAddr) console.log(`    commerceImpl:  "${commerceImplAddr}",`);
   if (freshRouter) console.log(`    routerProxy:   "${router.address}",`);
@@ -427,8 +632,11 @@ async function main(): Promise<void> {
       console.log(`     data : ${tx.data}`);
       console.log(``);
     });
-    console.log(`  Until these execute, the impl/policy addresses above are deployed but`);
-    console.log(`  NOT live behind the proxies.`);
+    console.log(`  Until these execute, the affected owner-gated changes are not live.`);
+    if (paymentTokenReconciliationPending) {
+      console.log(`  Desired payment tokens remain unverified until the owner executes the`);
+      console.log(`  queued calls and a later dry run reports reconciliation: verified.`);
+    }
     console.log(``);
   }
 

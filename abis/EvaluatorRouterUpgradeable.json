@@ -58,6 +58,11 @@
   },
   {
     "inputs": [],
+    "name": "JobExpired",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "JobNotOpen",
     "type": "error"
   },
