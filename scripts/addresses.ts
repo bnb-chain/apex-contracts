@@ -97,7 +97,7 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
     paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // same U as bscTestnet
     paymentTokens: [
       "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // U (ERC-8183)
-      "0xEC1C60D64a06896Df296438c12edD14E974FDE47", // USDC
+      "0x64544969ed7EBf5f083679233325356EbE738930", // USDC (ERC-8183)
       "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd", // USDT
     ],
     commerceProxy: "0x61d606db08c6acc393fd33e9c07da8f687771b6f",
