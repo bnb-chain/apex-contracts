@@ -259,9 +259,11 @@ Day 30 │ Anyone → commerce.claimRefund(jobId)                    [Expired]
 
 - **Inheritance:** `Initializable` + `Ownable2StepUpgradeable` +
   `PausableUpgradeable` + `UUPSUpgradeable` + `ReentrancyGuardTransient`.
-- **Storage:** flat upgradeable layout, 6 slots + `__gap[44]`. Fields:
+- **Storage:** flat upgradeable layout, 8 slots + `__gap[42]`. Fields:
   `paymentToken`, `platformFeeBP`, `platformTreasury`, `jobCounter`,
-  `mapping(uint256 => Job) jobs`, `mapping(uint256 => bool) jobHasBudget`.
+  `mapping(uint256 => Job) jobs`, `mapping(uint256 => bool) jobHasBudget`,
+  `mapping(uint256 => address) _jobPaymentTokens`,
+  `mapping(address => bool) _supportedPaymentTokens`.
   **Never reorder or remove fields**; only append by shrinking `__gap`.
 - **ERC-8183 surface** (all `MUST` + `SHOULD`): `createJob`, `setProvider`,
   `setBudget`, `fund`, `submit`, `complete`, `reject`, `claimRefund`.
@@ -297,7 +299,19 @@ expectedBudget` as front-running protection.
     `eth_getLogs` for jobs assigned to them without joining against
     `JobCreated` (audit I03). Both are documented in
     `docs/erc-8183-compliance.md` Delta 1.
-- **Admin:** `setPlatformFee(feeBP, treasury)`, `pause`, `unpause`.
+- **Multi-token payments:** each job is bound to a settlement token at
+  creation and settles in it. `createJob` uses `paymentToken`;
+  `createJobWithToken(..., token)` names one explicitly. Both require the
+  token to be on the owner-curated allowlist, as does `fund` for any
+  non-zero budget. `jobPaymentToken(jobId)` resolves a job's token,
+  falling back to `paymentToken` for jobs created before the upgrade, and
+  every transfer site in a job's lifecycle reads the same value. Recorded
+  as Delta 5 in `docs/erc-8183-compliance.md`.
+- **Admin:** `setPlatformFee(feeBP, treasury)`,
+  `setPaymentTokenSupported(token, supported)`, `pause`, `unpause`, plus
+  the one-shot `initializeMultiToken(tokens)` that seeds the allowlist on
+  the multi-token upgrade (mandatory — an empty allowlist reverts
+  `createJob` and every funded `fund`; see `docs/deployment.md` §2.2).
   `setPlatformFee` is hard-capped at `MAX_PLATFORM_FEE_BP = 1_000`
   (10%, audit I07) — even a compromised owner cannot route more than
   10% of any future settlement to the treasury. The cap is a
@@ -316,8 +330,11 @@ expectedBudget` as front-running protection.
   - any token whose `balanceOf(address)` can decrease without an
     outgoing `transfer` from `address`.
 
-  Confirming `paymentToken` against the token's source is part of the
-  pre-deploy checklist in `README.md`. The runtime warning lives on
+  This applies to **every token on the allowlist**, not just
+  `paymentToken`: `setPaymentTokenSupported` only checks that the address
+  holds code, so the admission criteria in `docs/deployment.md` §4.1 are
+  the operative control. Confirming each token against its verified
+  source is part of the pre-deploy checklist in `README.md`. The runtime warning lives on
   the `paymentToken` storage NatSpec and on the `initialize` and
   `fund` function NatSpec, so etherscan / IDE / SDK introspection all
   surface it. Adding `balanceOf`-delta reconciliation in `fund` is
@@ -507,7 +524,10 @@ Declares:
 - `getJob(uint256) → Job memory`
 - `complete(uint256, bytes32, bytes)`
 - `reject(uint256, bytes32, bytes)`
-- `paymentToken() → address`
+- `paymentToken() → address` — the kernel's default / pre-upgrade
+  fallback token, **not** the settlement asset of an arbitrary job.
+- `jobPaymentToken(uint256) → address` — the authoritative per-job
+  settlement asset.
 
 ### 5.5 · `IPolicy.sol`
 
@@ -541,6 +561,23 @@ interface IACPHook is IERC165 {
   function afterAction(uint256 jobId, bytes4 selector, bytes calldata data) external;
 }
 ```
+
+**Note for hook authors.** The kernel dispatches a job-creation
+`afterAction` under one of two selectors, with different payloads:
+
+| Selector             | `data`                                                                           |
+| -------------------- | -------------------------------------------------------------------------------- |
+| `createJob`          | `abi.encode(address client, address provider, address evaluator)`                |
+| `createJobWithToken` | `abi.encode(address client, address provider, address evaluator, address token)` |
+
+A hook that decodes creation data must branch on the selector. Note the
+failure mode is silent, not loud: feeding the four-field payload to a
+three-field `abi.decode` does **not** revert — the trailing word is
+ignored — so a hook written before this change keeps working and simply
+never sees the token it is now settling against. Hooks that ignore
+creation (the Router among them) are unaffected. Payloads for the
+remaining selectors are unchanged and listed in
+`docs/erc-8183-compliance.md` under "Hook data encoding".
 
 ---
 

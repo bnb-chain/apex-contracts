@@ -95,11 +95,16 @@ export const ADDRESSES: Partial<Record<string, DeployedAddresses>> = {
   },
   bscTestnetQa: {
     paymentToken: "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // same U as bscTestnet
+    paymentTokens: [
+      "0xc70B8741B8B07A6d61E54fd4B20f22Fa648E5565", // U (ERC-8183)
+      "0xEC1C60D64a06896Df296438c12edD14E974FDE47", // USDC
+      "0x337610d27c682E347C9cD60BD4b3b107C9d34dDd", // USDT
+    ],
     commerceProxy: "0x61d606db08c6acc393fd33e9c07da8f687771b6f",
-    commerceImpl: "0x6d95b205b8a5c0ea15cfa72a2e20cdbea0357362",
+    commerceImpl: "0x55c3826b39a0f671b2c3e5d0f1372cad0b911421",
     routerProxy: "0x1f31eb0183b64f57dbb1193ad9525dda27fcd02b",
-    routerImpl: "0xc1060ce42b2b1162fa0e66ba3ebc241e6b08c410",
-    policy: "0x23437ee9c2797ca26e7209a7456c60b39306001c",
+    routerImpl: "0x646c43adea1bf1b39d1399e1a041095076615eb0",
+    policy: "0x781c1848635dcd2c335e16d51af9d4e1112afaf1",
   },
   bsc: BSC_MAINNET,
   // In-process fork of BSC mainnet (see hardhat.config.ts) used to rehearse
