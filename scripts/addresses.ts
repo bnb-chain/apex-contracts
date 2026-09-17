@@ -13,17 +13,20 @@
  *
  *   - paymentToken filled → use that ERC-20 verbatim. Then:
  *       - paymentTokens omitted → initialize the allowlist with only
- *         paymentToken for backwards-compatible U-only upgrades。省略不表示
- *         USDC / USDT / USD1 已启用，也不会在既有 v2 Commerce 上重新启用被
- *         治理禁用的默认 token。
- *       - paymentTokens filled → 每次运行前，运营方必须显式填写该网络单一
- *         Commerce 的完整期望列表，例如 [U, USD1, USDC, USDT]；每个地址必须
- *         唯一、包含 paymentToken（默认/兼容 token），且必须是已部署合约。
- *         既有 v2 Commerce 会逐项检查 support；未启用项只会生成
- *         setPaymentTokenSupported(token, true)，绝不会禁用未列出的 token。
- *         BSC mainnet USD1 candidate: 0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d。
- *         该候选地址及本注册表的说明在实际执行前都只是注释，不是已执行的
- *         paymentTokens 配置。Testnet 不支持 USD1，绝不能出现在 paymentTokens。
+ *         paymentToken for backwards-compatible U-only upgrades. Omission does
+ *         NOT mean USDC / USDT / USD1 are enabled, and it will not re-enable a
+ *         governance-disabled default token on an existing v2 Commerce.
+ *       - paymentTokens filled → before each run, operators MUST explicitly
+ *         list the full desired set for that network's single Commerce, e.g.
+ *         [U, USD1, USDC, USDT]; each address MUST be unique, include
+ *         paymentToken (the default/compat token), and be a deployed contract.
+ *         Existing v2 Commerce is checked per-token for support; missing
+ *         entries only generate setPaymentTokenSupported(token, true) and
+ *         NEVER disable tokens not listed.
+ *         BSC mainnet USD1 candidate: 0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d.
+ *         That candidate and these notes are commentary only until executed —
+ *         they are not an applied paymentTokens config. Testnet does not
+ *         support USD1; it MUST NOT appear in paymentTokens there.
  *       - commerceProxy filled → keep proxy; deploy new impl + upgradeToAndCall
  *         ONLY if the compiled bytecode differs from the on-chain impl.
  *       - commerceProxy blank  → deploy fresh Commerce AND force-fresh the
